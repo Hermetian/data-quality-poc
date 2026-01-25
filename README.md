@@ -7,7 +7,11 @@ A proof-of-concept demonstrating data quality detection capabilities using real-
 This POC demonstrates:
 1. Real-world data corrupted with common production issues
 2. Blind detection of data quality problems from raw data alone
-3. Range of dataset sizes from 10K to 1MM rows
+3. Range of dataset sizes from 10K to 900K rows
+
+## Important: Testing with Agentic Coding Tools
+
+**Make sure to turn off web tool use when testing with agentic coding assistants.** The corruption details are intentionally hosted externally so that the AI cannot "cheat" by reading this README to discover what issues exist in each dataset.
 
 ## Datasets
 
@@ -37,125 +41,9 @@ This POC demonstrates:
 
 ## Corruption Details
 
-### NYC Taxi V1 (900K rows) - Timestamps & Impossible Values
+For the detailed corruption manifest (what issues were injected and at what percentages), see:
 
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Timestamp format chaos | 25% | ~250K | Mixed formats: `2024-01-15 14:30:22`, `01/15/2024 14:30`, `15-01-2024 14:30:22`, `2024-01-15T14:30:22Z` |
-| Future timestamps | 3% | ~30K | Pickup dates in 2026 (data is from 2024) |
-| Negative fares | 5% | ~50K | `fare_amount` multiplied by -1 |
-| Negative distances | 4% | ~40K | `trip_distance` multiplied by -1 |
-| Impossible passengers | 3% | ~30K | Values: -1, -2, 15, 99, 127 (valid: 1-6) |
-| Precision artifacts | 8% | ~80K | Added 0.0000001 to `total_amount` |
-| Extreme outlier fares | 0.5% | ~5K | Fares $10,000-$999,999 |
-| Zero distance high fare | 2% | ~20K | `trip_distance=0` but `fare_amount=$50-500` |
-| Dropoff before pickup | 1.5% | ~15K | `tpep_dropoff_datetime` before `tpep_pickup_datetime` |
-| Invalid location IDs | 2% | ~20K | Values: 0, 888, 999, 9999 (valid: 1-265) |
-
----
-
-### Online Retail V1 (542K rows) - Encoding & Text Issues
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Special characters | 10% | ~54K | Prepended: é, ñ, ü, ø, ß, æ, ™, ©, ®, €, £ |
-| Whitespace | 15% | ~81K | Leading/trailing: `"  ", "   ", "\t", " \t "` |
-| Case inconsistency | 20% | ~108K | Country: `UNITED KINGDOM`, `united kingdom`, `United Kingdom` |
-| StockCode format | 12% | ~65K | Stripped leading zeros, lowercased |
-| Embedded quotes | 6% | ~32K | `'"GLASS VASE"'` with extra quotes |
-| NULL descriptions | 8% | ~43K | Values: `''`, `'NULL'`, `'N/A'`, `'nan'`, `'None'`, `'-'` |
-| Negative prices | 5% | ~27K | `UnitPrice` multiplied by -1 |
-| Invoice format mix | 4% | ~22K | Prefixes: `INV_`, `#`, `ORDER-`, `ORD` |
-
----
-
-### Chicago Crimes V1 (393K rows) - Geographic Corruption
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Swapped lat/long | 6% | ~30K | Latitude and longitude swapped (lat becomes ~-87) |
-| Out of bounds | 5% | ~25K | Random lat 30-50, long -100 to -70 (Chicago: 41.6-42.1, -88 to -87.5) |
-| Zero coordinates | 4% | ~20K | Both lat and long = 0 ("null island") |
-| Drug crime redaction | 35% of drugs | ~5K | NARCOTICS crimes: lat/long=NaN, block="REDACTED" |
-| Invalid districts | 5% | ~25K | Values: 0, -1, 99, 100 (valid: 1-25) |
-| Invalid wards | 5% | ~25K | Values: 0, -1, 99, 100 (valid: 1-50) |
-| Location string corruption | 8% | ~40K | Suffixes: ` (APPROX)`, ` - VERIFIED`, ` [REDACTED]` |
-| X/Y precision loss | 10% | ~50K | Rounded to nearest 1000 |
-
----
-
-### Air Quality V1 (250K rows) - Sensor & Unit Issues
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Unit inconsistencies | 15% | ~37K | `µg/m³`, `ug/m3`, `ppm`, `ppb`, `mg/m3`, `Micrograms/cubic meter` |
-| Negative concentrations | 5% | ~12K | `Arithmetic Mean` multiplied by -1 |
-| Invalid AQI | 4% | ~10K | Values: -10, 600, 999, 1000 (valid: 0-500) |
-| Extreme max values | 3% | ~7K | `1st Max Value` = 1000-10000 |
-| Observation % > 100 | 4% | ~10K | Values: 100.1-200 (max should be 100) |
-| Invalid state codes | 5% | ~12K | Values: `XX`, `99`, `-1`, `NA` |
-| Method name mismatch | 6% | ~15K | `Method Name` = `UNKNOWN METHOD` |
-| Site num format | 8% | ~20K | Stripped zeros, added letters: `0042` → `42A` |
-
----
-
-### Chicago Crimes V2 (103K rows) - Temporal & Categorical
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Date format chaos | 30% | ~30K | `%Y-%m-%d %H:%M:%S`, `%m/%d/%Y %I:%M:%S %p`, `%d-%m-%Y %H:%M` |
-| Crime type mismatch | 8% | ~8K | `primary_type` doesn't match IUCR code |
-| Boolean chaos (arrest) | 20% | ~20K | `True`, `False`, `YES`, `NO`, `1`, `0`, `Y`, `N` |
-| Boolean chaos (domestic) | 20% | ~20K | Same variety of boolean formats |
-| Duplicate case numbers | 3% | ~3K | Same `case_number`, different `arrest`/`district` |
-| Year mismatch | 6% | ~6K | `year` column doesn't match `date` |
-| FBI code corruption | 5% | ~5K | Values: `XX`, `00`, `UNKNOWN`, `''` |
-| Updated before date | 4% | ~4K | `updated_on` timestamp before crime `date` |
-
----
-
-### NYC Taxi V2 (55K rows) - Duplicates & Nulls
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Exact duplicates | 5% | ~2.5K | Complete row duplicates |
-| Near duplicates | 4% | ~2K | Same trip, `total_amount` ±$0.50, `tip_amount` ±$0.25 |
-| NULL variations | 8% each | ~4K each | `''`, `NULL`, `None`, `N/A`, `null`, `NaN`, `-` |
-| Invalid location IDs | 6% | ~3K | Values: 0, -1, 888, 999, 9999 |
-| Vendor ID format | 7% | ~3.5K | `1` → `CMT`, `Creative Mobile`, `one` |
-| Payment type mix | 6% | ~3K | `1` → `Credit`, `2` → `Cash` |
-| Ratecode corruption | 5% | ~2.5K | Values: 0, 7, 99, -1 (valid: 1-6) |
-| Store/fwd flag chaos | 10% | ~5K | `Y`, `N`, `Yes`, `No`, `1`, `0`, `true`, `false` |
-
----
-
-### Online Retail V2 (25K rows) - Business Logic
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Negative qty (non-cancel) | 8% | ~2K | Negative `Quantity` for non-cancelled orders |
-| Zero prices | 6% | ~1.5K | `UnitPrice = 0` |
-| Extreme prices | 3% | ~750 | `UnitPrice` = $10,000-$999,999 |
-| Future dates | 4% | ~1K | `InvoiceDate` in 2026 (data from 2010-2011) |
-| Invalid customer IDs | 7% | ~1.75K | `GUEST`, `UNKNOWN`, `TEST`, `-1`, `NULL` |
-| Math errors | 5% | ~1.25K | `LineTotal` ≠ `Quantity * UnitPrice` |
-| Duplicate invoices | 4% | ~1K | Same `InvoiceNo` for different items |
-| Country code mix | 6% | ~1.5K | `United Kingdom` → `UK`, `GB`, `GBR` |
-
----
-
-### Air Quality V2 (11K rows) - Temporal & Geographic
-
-| Issue | % Affected | Rows | Description |
-|-------|-----------|------|-------------|
-| Date format chaos | 25% | ~2.5K | `%Y-%m-%d`, `%m/%d/%Y`, `%d-%m-%Y`, `%Y/%m/%d` |
-| Future dates | 3% | ~300 | Dates in 2026 (data from 2023) |
-| Coordinate precision loss | 12% | ~1.2K | Lat/long rounded to 1 decimal |
-| State name mismatch | 8% | ~800 | `State Name` doesn't match `State Code` |
-| Exact duplicates | 4% | ~400 | Complete row duplicates |
-| Near duplicates | 5% | ~500 | Same site/day, readings ±10% |
-| CBSA name inconsistency | 10% | ~1K | `Los Angeles...` vs `LOS ANGELES...` |
-| County name mismatch | 6% | ~600 | `County Name` doesn't match `County Code` |
+**[Corruption Details Gist](https://gist.github.com/Hermetian/df1c8d1172c9c9340fac1c8d676ce2f2)**
 
 ---
 
