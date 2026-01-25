@@ -425,10 +425,16 @@ def corrupt_crimes_v1():
 # CORRUPTION MANIFEST:
 #
 # 1. UNIT INCONSISTENCIES (15% of rows, ~37K affected)
-#    - "Units of Measure" changed to various formats
-#    - Values: 'µg/m³', 'ug/m3', 'ppm', 'ppb', 'mg/m3', 'Micrograms/cubic meter'
-#    - Applied to: Units of Measure column
-#    - Detection hint: Multiple representations of same unit
+#    - "Units of Measure" changed to various formats WITH VALUE CONVERSION
+#    - Base unit is µg/m³. Conversions applied:
+#      * 'µg/m³' -> factor 1 (no change)
+#      * 'ug/m3' -> factor 1 (ASCII variant, no change)
+#      * 'Micrograms/cubic meter' -> factor 1 (verbose, no change)
+#      * 'mg/m3' -> factor 0.001 (milligrams)
+#      * 'ng/m3' -> factor 1000 (nanograms)
+#    - Applied to: Units of Measure, Arithmetic Mean, 1st Max Value columns
+#    - Detection hint: Must normalize units to compare values
+#    - RECOVERABLE: Convert all values back to µg/m³ using inverse factors
 #
 # 2. NEGATIVE CONCENTRATIONS (5% of rows, ~12K affected)
 #    - Arithmetic Mean multiplied by -1
@@ -482,11 +488,27 @@ def corrupt_airquality_v1():
     df = df.sample(n=250000, random_state=42)
     print(f"  Sampled to {len(df):,} rows")
 
-    # 1. Unit inconsistencies (15%)
-    units = ['µg/m³', 'ug/m3', 'ppm', 'ppb', 'mg/m3', 'Micrograms/cubic meter']
+    # 1. Unit inconsistencies (15%) - WITH PROPER VALUE CONVERSION (vectorized)
+    # Base unit is µg/m³. Define conversion factors from µg/m³ to target unit.
+    unit_names = ['µg/m³', 'ug/m3', 'Micrograms/cubic meter', 'mg/m3', 'ng/m3']
+    unit_factors = [1, 1, 1, 0.001, 1000]
+
     unit_mask = np.random.random(len(df)) < 0.15
-    df.loc[unit_mask, 'Units of Measure'] = np.random.choice(units, size=unit_mask.sum())
-    print(f"    Applied unit inconsistencies to {unit_mask.sum():,} rows")
+    n_affected = unit_mask.sum()
+
+    # Randomly assign unit indices to affected rows
+    unit_indices = np.random.randint(0, len(unit_names), size=n_affected)
+    chosen_units = [unit_names[i] for i in unit_indices]
+    chosen_factors = np.array([unit_factors[i] for i in unit_indices])
+
+    # Apply unit labels
+    df.loc[unit_mask, 'Units of Measure'] = chosen_units
+
+    # Apply conversion factors to values
+    df.loc[unit_mask, 'Arithmetic Mean'] = df.loc[unit_mask, 'Arithmetic Mean'].values * chosen_factors
+    df.loc[unit_mask, '1st Max Value'] = df.loc[unit_mask, '1st Max Value'].values * chosen_factors
+
+    print(f"    Applied unit inconsistencies (with conversion) to {n_affected:,} rows")
 
     # 2. Negative concentrations (5%)
     neg_mask = np.random.random(len(df)) < 0.05
