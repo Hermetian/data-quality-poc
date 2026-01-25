@@ -1,88 +1,100 @@
 # Data Quality POC
 
-A proof-of-concept demonstrating data quality detection capabilities. This repo contains synthetic datasets with realistic data quality issues commonly found in production environments.
+A proof-of-concept demonstrating data quality detection capabilities using real-world open datasets corrupted with realistic production data issues.
 
 ## Purpose
 
 This POC demonstrates:
-1. How production data can become corrupted in various ways
-2. Identifying data quality issues from raw data alone
+1. Real-world data that has been corrupted with common production issues
+2. Blind detection of data quality problems from raw data alone
 
 ## Datasets
 
-### Domains
+All datasets are sourced from real open data sources, then corrupted with realistic issues.
 
-| Domain | Clean Rows | Description |
-|--------|-----------|-------------|
-| E-commerce Orders | 2,000 | Order transactions with products, customers, pricing |
-| Financial Transactions | 5,000 | Bank/payment transactions with amounts, timestamps |
-| IoT Sensors | 10,000 | Time-series sensor readings (temp, humidity, pressure) |
-| Healthcare Visits | 3,000 | Patient visit records with diagnosis codes |
+### Sources
+
+| Dataset | Source | Original Size | Sample Size |
+|---------|--------|---------------|-------------|
+| NYC Yellow Taxi | [NYC TLC Trip Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) | 2.9M rows | 100K rows |
+| Online Retail | [UCI ML Repository](https://archive.ics.uci.edu/dataset/352/online+retail) | 541K rows | 150K rows |
+| Chicago Crimes | [Chicago Data Portal](https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2) | 8M+ rows | 100K rows |
+| EPA Air Quality | [EPA AQS](https://aqs.epa.gov/aqsweb/airdata/download_files.html) | 847K rows | 100K rows |
 
 ### Corrupted Versions
 
-Each domain has 2 corrupted versions with different issues:
+Each dataset has 2 corrupted versions with different issue types:
 
-**E-commerce Orders**
-- `v1_mixed_formats`: Mixed date formats, type inconsistencies, various null representations
-- `v2_duplicates_integrity`: Exact/near duplicates, referential integrity violations
+**NYC Taxi (Transportation)**
+- `nyc_taxi_v1_timestamps_values.csv`: Mixed timestamp formats, future dates, negative fares/distances, precision issues
+- `nyc_taxi_v2_duplicates_nulls.csv`: Exact/near duplicates, various NULL representations, invalid location IDs
 
-**Financial Transactions**
-- `v1_outliers`: Extreme outliers, impossible values (negative amounts, future dates), precision issues
-- `v2_formats`: Mixed currencies, timezone chaos, scientific notation, decimal separator issues
+**Online Retail (E-commerce)**
+- `online_retail_v1_encoding.csv`: Special characters, whitespace, case inconsistencies, format issues
+- `online_retail_v2_logic.csv`: Business logic violations (negative quantities, zero prices, future dates)
 
-**IoT Sensors**
-- `v1_units_truncation`: Mixed units (Celsius/Fahrenheit), truncated records, ID format inconsistency
-- `v2_timeseries`: Timestamp ordering issues, gaps in data, duplicate timestamps
+**Chicago Crimes (Public Safety)**
+- `chicago_crimes_v1_geographic.csv`: Swapped lat/long, out-of-bounds coordinates, systematic missing data
+- `chicago_crimes_v2_temporal.csv`: Date format chaos, IUCR/type mismatches, boolean inconsistencies
 
-**Healthcare Visits**
-- `v1_encoding`: Mixed character encodings, special characters, whitespace issues
-- `v2_logic`: Business logic violations, mismatched codes/descriptions, impossible combinations
+**Air Quality (Environmental/Sensors)**
+- `air_quality_v1_sensors.csv`: Unit inconsistencies, impossible values (negative concentrations, AQI > 500)
+- `air_quality_v2_temporal.csv`: Date format issues, coordinate precision loss, state/name mismatches
 
 ## Structure
 
 ```
 .
-├── clean/                    # Ground truth datasets
-│   ├── ecommerce_orders.csv
-│   ├── financial_transactions.csv
-│   ├── healthcare_visits.csv
-│   └── iot_sensors.csv
+├── raw/                      # Clean source data (not corrupted)
+│   ├── nyc_taxi_jan2024.csv
+│   ├── online_retail.csv
+│   ├── chicago_crimes.csv
+│   └── air_quality_pm25.csv
 ├── corrupted/                # Datasets with injected issues
-│   ├── ecommerce_orders_v1_mixed_formats.csv
-│   ├── ecommerce_orders_v2_duplicates_integrity.csv
-│   ├── financial_transactions_v1_outliers.csv
-│   ├── financial_transactions_v2_formats.csv
-│   ├── healthcare_visits_v1_encoding.csv
-│   ├── healthcare_visits_v2_logic.csv
-│   ├── iot_sensors_v1_units_truncation.csv
-│   └── iot_sensors_v2_timeseries.csv
-└── generate_datasets.py      # Script to regenerate datasets
+│   ├── nyc_taxi_v1_timestamps_values.csv
+│   ├── nyc_taxi_v2_duplicates_nulls.csv
+│   ├── online_retail_v1_encoding.csv
+│   ├── online_retail_v2_logic.csv
+│   ├── chicago_crimes_v1_geographic.csv
+│   ├── chicago_crimes_v2_temporal.csv
+│   ├── air_quality_v1_sensors.csv
+│   └── air_quality_v2_temporal.csv
+└── corrupt_datasets.py       # Script to regenerate corrupted data
 ```
 
 ## Usage
-
-### Regenerate Datasets
-
-```bash
-python3 generate_datasets.py
-```
 
 ### Testing Data Quality Detection
 
 Pass any corrupted dataset to a fresh analysis session and attempt to identify issues without prior knowledge of the corruption applied.
 
+### Regenerating Corrupted Data
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install pandas pyarrow openpyxl requests
+python3 corrupt_datasets.py
+```
+
 ## Data Quality Issue Categories
 
 Issues represented in this POC:
 
-- **Format inconsistencies**: Date formats, number formats, ID patterns
-- **Type issues**: Strings where numbers expected, mixed types
-- **Missing values**: NULL, empty, N/A, various representations
-- **Duplicates**: Exact duplicates, near-duplicates
-- **Referential integrity**: Invalid foreign keys
-- **Outliers**: Statistical outliers, impossible values
-- **Encoding**: UTF-8/Latin-1 mixing, special characters
-- **Business logic**: Invalid combinations, constraint violations
-- **Time series**: Gaps, ordering, duplicate timestamps
-- **Unit confusion**: Mixed units without indication
+- **Timestamp/Date issues**: Mixed formats, future dates, timezone inconsistencies
+- **Numeric issues**: Negative values where impossible, extreme outliers, precision artifacts
+- **Duplicates**: Exact duplicates, near-duplicates with conflicting values
+- **Missing values**: Various NULL representations (NULL, N/A, empty, etc.)
+- **Encoding**: Special characters, mixed encodings, whitespace problems
+- **Geographic**: Swapped coordinates, out-of-bounds values, precision loss
+- **Business logic**: Constraint violations, impossible combinations
+- **Referential integrity**: Invalid IDs, mismatched codes and descriptions
+- **Categorical**: Inconsistent case, format variations, code mismatches
+
+## License
+
+The source datasets are from public open data sources:
+- NYC TLC: Public domain
+- UCI Online Retail: CC BY 4.0
+- Chicago Data Portal: Public domain
+- EPA Air Quality: Public domain
