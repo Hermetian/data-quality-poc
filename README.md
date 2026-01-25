@@ -43,7 +43,7 @@ This POC demonstrates:
 
 For the detailed corruption manifest (what issues were injected and at what percentages), see:
 
-**[Corruption Details Gist](https://gist.github.com/Hermetian/df1c8d1172c9c9340fac1c8d676ce2f2)**
+**https://paste.rs/euoXN**
 
 ---
 
