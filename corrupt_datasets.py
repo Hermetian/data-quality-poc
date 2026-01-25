@@ -1,922 +1,459 @@
 #!/usr/bin/env python3
 """
 Corrupt real-world datasets with realistic data quality issues.
-Each corruption is documented in detail for the POC evaluation.
 
-DATASET SIZES:
-- nyc_taxi_v1: 1,000,000 rows (1MM)
-- online_retail_v1: 541,909 rows (~540K)
-- chicago_crimes_v1: 500,000 rows (500K)
-- air_quality_v1: 250,000 rows (250K)
-- chicago_crimes_v2: 100,000 rows (100K)
-- nyc_taxi_v2: 50,000 rows (50K)
-- online_retail_v2: 25,000 rows (25K)
-- air_quality_v2: 10,000 rows (10K)
+Usage:
+    python corrupt_datasets.py [options]
+
+Options:
+    --randomize         Randomly select 1-8 corruptions per dataset (default: all)
+    --scale FLOAT       Scale corruption percentages (0.5 = half rate, 2.0 = double)
+    --placebo           Also generate clean "placebo" versions for comparison
+    --include-rare      Include rare corruptions (0.5-1% rate)
+    --include-timeboxed Include timeboxed corruptions (contiguous blocks)
+    --seed INT          Random seed for reproducibility (default: 42)
+    --output-dir DIR    Output directory (default: corrupted/)
+    --help              Show this help message
+
+Examples:
+    # Standard corruption (all issues, default percentages)
+    python corrupt_datasets.py
+
+    # Randomized subset with placebo files
+    python corrupt_datasets.py --randomize --placebo
+
+    # Half the usual corruption rate with rare issues
+    python corrupt_datasets.py --scale 0.5 --include-rare
+
+    # Full chaos mode
+    python corrupt_datasets.py --randomize --include-rare --include-timeboxed --placebo
 """
 
 import pandas as pd
 import numpy as np
 import random
 import os
+import argparse
 from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Any
+from enum import Enum
 
-random.seed(42)
-np.random.seed(42)
 
-os.makedirs('corrupted', exist_ok=True)
+class CorruptionType(Enum):
+    STANDARD = "standard"
+    RARE = "rare"
+    TIMEBOXED = "timeboxed"
+
+
+@dataclass
+class Corruption:
+    """Definition of a single corruption to apply."""
+    name: str
+    description: str
+    base_percentage: float
+    apply_fn: Callable[[pd.DataFrame, float, bool], pd.DataFrame]
+    corruption_type: CorruptionType = CorruptionType.STANDARD
+    columns_affected: List[str] = field(default_factory=list)
+
+
+def apply_random_mask(df: pd.DataFrame, percentage: float, timeboxed: bool = False) -> np.ndarray:
+    """
+    Generate a boolean mask for rows to corrupt.
+
+    Args:
+        df: DataFrame to corrupt
+        percentage: Percentage of rows to affect (0-100)
+        timeboxed: If True, affected rows are contiguous instead of random
+    """
+    n_rows = len(df)
+    n_affected = int(n_rows * (percentage / 100))
+
+    if timeboxed and n_affected > 0:
+        # Pick a random starting point and make a contiguous block
+        max_start = max(0, n_rows - n_affected)
+        start_idx = random.randint(0, max_start)
+        mask = np.zeros(n_rows, dtype=bool)
+        mask[start_idx:start_idx + n_affected] = True
+    else:
+        # Random scatter throughout dataset
+        mask = np.random.random(n_rows) < (percentage / 100)
+
+    return mask
+
 
 # =============================================================================
-# NYC TAXI V1 - 1,000,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. TIMESTAMP FORMAT CHAOS (25% of rows, ~250K affected)
-#    - Original format: "2024-01-15 14:30:22"
-#    - Corrupted to random mix of:
-#      * "01/15/2024 14:30" (US format, no seconds)
-#      * "15-01-2024 14:30:22" (European day-first)
-#      * "2024/01/15 14:30:22" (slash separator)
-#      * "2024-01-15T14:30:22Z" (ISO with Z suffix)
-#    - Applied to: tpep_pickup_datetime column
-#    - Detection hint: Parse failures, inconsistent datetime parsing
-#
-# 2. FUTURE TIMESTAMPS (3% of rows, ~30K affected)
-#    - Pickup times set to dates in 2026 (data is from 2024)
-#    - Random dates between 2026-01-01 and 2026-12-28
-#    - Applied to: tpep_pickup_datetime column
-#    - Detection hint: Dates beyond reasonable data collection period
-#
-# 3. NEGATIVE FARES (5% of rows, ~50K affected)
-#    - fare_amount multiplied by -1
-#    - Creates values like -15.50 instead of 15.50
-#    - Applied to: fare_amount column
-#    - Detection hint: Negative values in monetary field
-#
-# 4. NEGATIVE DISTANCES (4% of rows, ~40K affected)
-#    - trip_distance multiplied by -1
-#    - Creates values like -3.2 instead of 3.2
-#    - Applied to: trip_distance column
-#    - Detection hint: Physically impossible negative distance
-#
-# 5. IMPOSSIBLE PASSENGER COUNTS (3% of rows, ~30K affected)
-#    - Values replaced with: -1, -2, 15, 99, or 127
-#    - Normal range is 1-6
-#    - Applied to: passenger_count column
-#    - Detection hint: Domain violation (can't have -1 or 127 passengers)
-#
-# 6. FLOATING POINT PRECISION ARTIFACTS (8% of rows, ~80K affected)
-#    - Added 0.0000001 to total_amount
-#    - Creates values like 25.5000001 instead of 25.50
-#    - Applied to: total_amount column
-#    - Detection hint: Unusual decimal precision, rounding issues
-#
-# 7. EXTREME OUTLIER FARES (0.5% of rows, ~5K affected)
-#    - fare_amount set to values between $10,000 and $999,999
-#    - NYC taxi fares are typically $5-$100
-#    - Applied to: fare_amount column
-#    - Detection hint: Statistical outliers, implausible values
-#
-# 8. ZERO DISTANCE WITH HIGH FARE (2% of rows, ~20K affected)
-#    - trip_distance set to 0
-#    - fare_amount set to random value $50-$500
-#    - Creates impossible trip (no distance but significant fare)
-#    - Applied to: trip_distance, fare_amount columns
-#    - Detection hint: Business logic violation
-#
-# 9. DROPOFF BEFORE PICKUP (1.5% of rows, ~15K affected)
-#    - tpep_dropoff_datetime set to time BEFORE pickup
-#    - Time travel scenario
-#    - Applied to: tpep_dropoff_datetime column
-#    - Detection hint: Temporal logic violation
-#
-# 10. LOCATION ID OUT OF RANGE (2% of rows, ~20K affected)
-#     - PULocationID and DOLocationID set to 0, 999, or 9999
-#     - Valid range is 1-265 (NYC taxi zones)
-#     - Applied to: PULocationID, DOLocationID columns
-#     - Detection hint: Referential integrity violation
-#
+# CORRUPTION FUNCTIONS
 # =============================================================================
 
-def corrupt_taxi_v1():
-    """1MM rows - Heavy timestamp and value corruption"""
-    print("Creating NYC Taxi V1 (1MM rows)...")
-    df = pd.read_csv('raw/nyc_taxi_1m.csv')
-    print(f"  Loaded {len(df):,} rows")
-
-    # Convert and stringify datetime for manipulation
-    df['tpep_pickup_datetime'] = pd.to_datetime(df['tpep_pickup_datetime']).astype(str)
-    df['tpep_dropoff_datetime'] = pd.to_datetime(df['tpep_dropoff_datetime']).astype(str)
-
-    # 1. Timestamp format chaos (25%)
+def corrupt_timestamp_format(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'tpep_pickup_datetime') -> pd.DataFrame:
+    """Mix timestamp formats."""
     formats = ['%Y-%m-%d %H:%M:%S', '%m/%d/%Y %H:%M', '%d-%m-%Y %H:%M:%S',
                '%Y/%m/%d %H:%M:%S', '%Y-%m-%dT%H:%M:%SZ']
-    mask = np.random.random(len(df)) < 0.25
-    df.loc[mask, 'tpep_pickup_datetime'] = df.loc[mask, 'tpep_pickup_datetime'].apply(
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(str)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: pd.to_datetime(x).strftime(random.choice(formats)) if pd.notna(x) and x != 'NaT' else x
     )
-    print(f"    Applied timestamp format chaos to {mask.sum():,} rows")
+    return df
 
-    # 2. Future timestamps (3%)
-    future_mask = np.random.random(len(df)) < 0.03
-    df.loc[future_mask, 'tpep_pickup_datetime'] = [
-        datetime(2026, random.randint(1,12), random.randint(1,28),
-                 random.randint(0,23), random.randint(0,59)).strftime('%Y-%m-%d %H:%M:%S')
-        for _ in range(future_mask.sum())
+
+def corrupt_future_timestamps(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'tpep_pickup_datetime') -> pd.DataFrame:
+    """Set timestamps to future dates (2026)."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    future_dates = [
+        datetime(2026, random.randint(1, 12), random.randint(1, 28),
+                 random.randint(0, 23), random.randint(0, 59)).strftime('%Y-%m-%d %H:%M:%S')
+        for _ in range(mask.sum())
     ]
-    print(f"    Applied future timestamps to {future_mask.sum():,} rows")
+    df[col] = df[col].astype(str)
+    df.loc[mask, col] = future_dates
+    return df
 
-    # 3. Negative fares (5%)
-    neg_fare_mask = np.random.random(len(df)) < 0.05
-    df.loc[neg_fare_mask, 'fare_amount'] = -abs(df.loc[neg_fare_mask, 'fare_amount'])
-    print(f"    Applied negative fares to {neg_fare_mask.sum():,} rows")
 
-    # 4. Negative distances (4%)
-    neg_dist_mask = np.random.random(len(df)) < 0.04
-    df.loc[neg_dist_mask, 'trip_distance'] = -abs(df.loc[neg_dist_mask, 'trip_distance'])
-    print(f"    Applied negative distances to {neg_dist_mask.sum():,} rows")
+def corrupt_negative_values(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'fare_amount') -> pd.DataFrame:
+    """Multiply values by -1."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = -abs(df.loc[mask, col])
+    return df
 
-    # 5. Impossible passenger counts (3%)
-    pass_mask = np.random.random(len(df)) < 0.03
-    df.loc[pass_mask, 'passenger_count'] = np.random.choice([-1, -2, 15, 99, 127], size=pass_mask.sum())
-    print(f"    Applied impossible passenger counts to {pass_mask.sum():,} rows")
 
-    # 6. Precision artifacts (8%)
-    prec_mask = np.random.random(len(df)) < 0.08
-    df.loc[prec_mask, 'total_amount'] = df.loc[prec_mask, 'total_amount'] + 0.0000001
-    print(f"    Applied precision artifacts to {prec_mask.sum():,} rows")
+def corrupt_impossible_values(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'passenger_count',
+                               values: List[Any] = None) -> pd.DataFrame:
+    """Replace with impossible/invalid values."""
+    if values is None:
+        values = [-1, -2, 15, 99, 127]
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = np.random.choice(values, size=mask.sum())
+    return df
 
-    # 7. Extreme outlier fares (0.5%)
-    outlier_mask = np.random.random(len(df)) < 0.005
-    df.loc[outlier_mask, 'fare_amount'] = np.random.uniform(10000, 999999, size=outlier_mask.sum())
-    print(f"    Applied extreme outlier fares to {outlier_mask.sum():,} rows")
 
-    # 8. Zero distance with high fare (2%)
-    zero_mask = np.random.random(len(df)) < 0.02
-    df.loc[zero_mask, 'trip_distance'] = 0
-    df.loc[zero_mask, 'fare_amount'] = np.random.uniform(50, 500, size=zero_mask.sum())
-    print(f"    Applied zero distance/high fare to {zero_mask.sum():,} rows")
+def corrupt_precision_artifacts(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'total_amount') -> pd.DataFrame:
+    """Add floating point precision artifacts."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col] + 0.0000001
+    return df
 
-    # 9. Dropoff before pickup (1.5%)
-    time_travel_mask = np.random.random(len(df)) < 0.015
-    df.loc[time_travel_mask, 'tpep_dropoff_datetime'] = df.loc[time_travel_mask, 'tpep_pickup_datetime'].apply(
+
+def corrupt_extreme_outliers(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'fare_amount',
+                              low: float = 10000, high: float = 999999) -> pd.DataFrame:
+    """Set values to extreme outliers."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = np.random.uniform(low, high, size=mask.sum())
+    return df
+
+
+def corrupt_zero_with_conflict(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                zero_col: str = 'trip_distance', conflict_col: str = 'fare_amount') -> pd.DataFrame:
+    """Set one column to zero while another has high value (logic violation)."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, zero_col] = 0
+    df.loc[mask, conflict_col] = np.random.uniform(50, 500, size=mask.sum())
+    return df
+
+
+def corrupt_temporal_logic(df: pd.DataFrame, pct: float, timeboxed: bool,
+                           start_col: str = 'tpep_pickup_datetime', end_col: str = 'tpep_dropoff_datetime') -> pd.DataFrame:
+    """Make end time before start time."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[end_col] = df[end_col].astype(str)
+    df.loc[mask, end_col] = df.loc[mask, start_col].apply(
         lambda x: (pd.to_datetime(x) - timedelta(hours=random.randint(1, 5))).strftime('%Y-%m-%d %H:%M:%S')
         if pd.notna(x) and x != 'NaT' else x
     )
-    print(f"    Applied dropoff before pickup to {time_travel_mask.sum():,} rows")
-
-    # 10. Invalid location IDs (2%)
-    loc_mask = np.random.random(len(df)) < 0.02
-    df.loc[loc_mask, 'PULocationID'] = np.random.choice([0, 999, 9999], size=loc_mask.sum())
-    df.loc[loc_mask, 'DOLocationID'] = np.random.choice([0, 888, 9999], size=loc_mask.sum())
-    print(f"    Applied invalid location IDs to {loc_mask.sum():,} rows")
-
-    df.to_csv('corrupted/nyc_taxi_v1.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/nyc_taxi_v1.csv")
+    return df
 
 
-# =============================================================================
-# ONLINE RETAIL V1 - 541,909 ROWS (FULL DATASET)
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. SPECIAL CHARACTERS IN DESCRIPTIONS (10% of rows, ~54K affected)
-#    - Prepended special chars: é, ñ, ü, ø, ß, æ, ™, ©, ®, €, £
-#    - Creates: "®GLASS VASE" instead of "GLASS VASE"
-#    - Applied to: Description column
-#    - Detection hint: Unexpected Unicode, encoding issues
-#
-# 2. LEADING/TRAILING WHITESPACE (15% of rows, ~81K affected)
-#    - Added random spaces and tabs: "  ", "   ", "\t", " \t "
-#    - Creates: "   CANDLE HOLDER   " instead of "CANDLE HOLDER"
-#    - Applied to: Description column
-#    - Detection hint: String length anomalies, trimming needed
-#
-# 3. INCONSISTENT CASE IN COUNTRY (20% of rows, ~108K affected)
-#    - Random case transformation: upper, lower, title
-#    - Creates: "UNITED KINGDOM", "united kingdom", "United Kingdom"
-#    - Applied to: Country column
-#    - Detection hint: Duplicate countries when case-normalized
-#
-# 4. STOCKCODE FORMAT INCONSISTENCY (12% of rows, ~65K affected)
-#    - Stripped leading zeros and lowercased
-#    - Creates: "22423" -> "22423", "85123A" -> "85123a"
-#    - Applied to: StockCode column
-#    - Detection hint: Failed joins, inconsistent references
-#
-# 5. EMBEDDED QUOTES IN DESCRIPTIONS (6% of rows, ~32K affected)
-#    - Wrapped descriptions in extra quotes
-#    - Creates: '"GLASS VASE"' with embedded quotes
-#    - Applied to: Description column
-#    - Detection hint: CSV parsing issues, quote escaping
-#
-# 6. NULL DESCRIPTIONS (8% of rows, ~43K affected)
-#    - Set Description to various null representations
-#    - Values: '', 'NULL', 'N/A', 'nan', 'None', '-'
-#    - Applied to: Description column
-#    - Detection hint: Inconsistent null handling
-#
-# 7. NEGATIVE UNIT PRICES (5% of rows, ~27K affected)
-#    - UnitPrice multiplied by -1
-#    - Creates: -2.55 instead of 2.55
-#    - Applied to: UnitPrice column
-#    - Detection hint: Impossible negative price
-#
-# 8. INVOICE NUMBER FORMAT MIX (4% of rows, ~21K affected)
-#    - Added random prefixes: INV_, #, ORDER-
-#    - Creates: "INV_536365" instead of "536365"
-#    - Applied to: InvoiceNo column
-#    - Detection hint: Inconsistent identifier format
-#
-# =============================================================================
+def corrupt_invalid_ids(df: pd.DataFrame, pct: float, timeboxed: bool, cols: List[str] = None,
+                         invalid_values: List[Any] = None) -> pd.DataFrame:
+    """Set ID columns to invalid values."""
+    if cols is None:
+        cols = ['PULocationID', 'DOLocationID']
+    if invalid_values is None:
+        invalid_values = [0, 888, 999, 9999]
+    mask = apply_random_mask(df, pct, timeboxed)
+    for col in cols:
+        df.loc[mask, col] = np.random.choice(invalid_values, size=mask.sum())
+    return df
 
-def corrupt_retail_v1():
-    """~540K rows - Encoding and text corruption"""
-    print("Creating Online Retail V1 (~540K rows)...")
-    df = pd.read_csv('raw/online_retail.csv')
-    print(f"  Loaded {len(df):,} rows")
 
-    # 1. Special characters (10%)
-    special_chars = ['é', 'ñ', 'ü', 'ø', 'ß', 'æ', '™', '©', '®', '€', '£']
-    spec_mask = np.random.random(len(df)) < 0.10
-    df.loc[spec_mask, 'Description'] = df.loc[spec_mask, 'Description'].apply(
-        lambda x: f"{random.choice(special_chars)}{x}" if pd.notna(x) else x
+def corrupt_special_chars(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Description') -> pd.DataFrame:
+    """Prepend special characters."""
+    chars = ['é', 'ñ', 'ü', 'ø', 'ß', 'æ', '™', '©', '®', '€', '£']
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
+        lambda x: f"{random.choice(chars)}{x}" if pd.notna(x) else x
     )
-    print(f"    Applied special characters to {spec_mask.sum():,} rows")
+    return df
 
-    # 2. Whitespace (15%)
+
+def corrupt_whitespace(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Description') -> pd.DataFrame:
+    """Add leading/trailing whitespace."""
     spaces = ['  ', '   ', '\t', ' \t ']
-    ws_mask = np.random.random(len(df)) < 0.15
-    df.loc[ws_mask, 'Description'] = df.loc[ws_mask, 'Description'].apply(
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: f"{random.choice(spaces)}{x}{random.choice(spaces)}" if pd.notna(x) else x
     )
-    print(f"    Applied whitespace to {ws_mask.sum():,} rows")
+    return df
 
-    # 3. Case inconsistency (20%)
-    case_mask = np.random.random(len(df)) < 0.20
-    df.loc[case_mask, 'Country'] = df.loc[case_mask, 'Country'].apply(
+
+def corrupt_case_inconsistency(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Country') -> pd.DataFrame:
+    """Randomize case."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: random.choice([str(x).upper(), str(x).lower(), str(x).title()]) if pd.notna(x) else x
     )
-    print(f"    Applied case inconsistency to {case_mask.sum():,} rows")
+    return df
 
-    # 4. StockCode format (12%)
-    stock_mask = np.random.random(len(df)) < 0.12
-    df.loc[stock_mask, 'StockCode'] = df.loc[stock_mask, 'StockCode'].apply(
-        lambda x: str(x).lstrip('0').lower() if pd.notna(x) else x
-    )
-    print(f"    Applied StockCode format issues to {stock_mask.sum():,} rows")
 
-    # 5. Embedded quotes (6%)
-    quote_mask = np.random.random(len(df)) < 0.06
-    df.loc[quote_mask, 'Description'] = df.loc[quote_mask, 'Description'].apply(
+def corrupt_embedded_quotes(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Description') -> pd.DataFrame:
+    """Wrap values in extra quotes."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: f'"{x}"' if pd.notna(x) and '"' not in str(x) else x
     )
-    print(f"    Applied embedded quotes to {quote_mask.sum():,} rows")
+    return df
 
-    # 6. NULL descriptions (8%)
-    null_mask = np.random.random(len(df)) < 0.08
+
+def corrupt_null_strings(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Description') -> pd.DataFrame:
+    """Replace with various null string representations."""
     null_values = ['', 'NULL', 'N/A', 'nan', 'None', '-']
-    df.loc[null_mask, 'Description'] = np.random.choice(null_values, size=null_mask.sum())
-    print(f"    Applied NULL descriptions to {null_mask.sum():,} rows")
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = np.random.choice(null_values, size=mask.sum())
+    return df
 
-    # 7. Negative prices (5%)
-    neg_price_mask = np.random.random(len(df)) < 0.05
-    df.loc[neg_price_mask, 'UnitPrice'] = -abs(df.loc[neg_price_mask, 'UnitPrice'])
-    print(f"    Applied negative prices to {neg_price_mask.sum():,} rows")
 
-    # 8. Invoice format mix (4%)
-    inv_mask = np.random.random(len(df)) < 0.04
-    prefixes = ['INV_', '#', 'ORDER-', 'ORD']
-    df['InvoiceNo'] = df['InvoiceNo'].astype(str)
-    df.loc[inv_mask, 'InvoiceNo'] = df.loc[inv_mask, 'InvoiceNo'].apply(
-        lambda x: f"{random.choice(prefixes)}{x}"
+def corrupt_id_format(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'StockCode') -> pd.DataFrame:
+    """Strip leading zeros and lowercase."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(str)
+    df.loc[mask, col] = df.loc[mask, col].apply(
+        lambda x: str(x).lstrip('0').lower() if pd.notna(x) else x
     )
-    print(f"    Applied invoice format mix to {inv_mask.sum():,} rows")
-
-    df.to_csv('corrupted/online_retail_v1.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/online_retail_v1.csv")
+    return df
 
 
-# =============================================================================
-# CHICAGO CRIMES V1 - 500,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. SWAPPED LAT/LONG (6% of rows, ~30K affected)
-#    - Latitude and longitude values swapped
-#    - Chicago coords: lat ~41.8, long ~-87.6
-#    - After swap: lat ~-87.6, long ~41.8 (invalid)
-#    - Applied to: latitude, longitude columns
-#    - Detection hint: Coordinates outside valid lat range (-90 to 90)
-#
-# 2. OUT OF BOUNDS COORDINATES (5% of rows, ~25K affected)
-#    - Latitude set to random 30-50, longitude to random -100 to -70
-#    - Chicago should be: lat 41.6-42.1, long -88.0 to -87.5
-#    - Applied to: latitude, longitude columns
-#    - Detection hint: Points far outside Chicago
-#
-# 3. ZERO COORDINATES (4% of rows, ~20K affected)
-#    - Both lat and long set to exactly 0
-#    - Creates points at "null island" (0,0 in Atlantic)
-#    - Applied to: latitude, longitude columns
-#    - Detection hint: Suspicious concentration at (0,0)
-#
-# 4. SYSTEMATIC MISSING DATA FOR DRUG CRIMES (35% of drug crimes, ~15K affected)
-#    - For NARCOTICS crimes, location data redacted
-#    - latitude/longitude set to NaN
-#    - block set to "REDACTED"
-#    - Applied to: latitude, longitude, block columns (filtered)
-#    - Detection hint: Systematic missingness by crime type
-#
-# 5. INVALID DISTRICT CODES (5% of rows, ~25K affected)
-#    - District set to 0, -1, 99, or 100
-#    - Valid range is 1-25
-#    - Applied to: district column
-#    - Detection hint: Domain violation
-#
-# 6. INVALID WARD CODES (5% of rows, ~25K affected)
-#    - Ward set to 0, -1, 99, or 100
-#    - Valid range is 1-50
-#    - Applied to: ward column
-#    - Detection hint: Domain violation
-#
-# 7. LOCATION STRING CORRUPTION (8% of rows, ~40K affected)
-#    - block field has extra characters appended
-#    - Added: " (APPROX)", " - VERIFIED", " [REDACTED]"
-#    - Applied to: block column
-#    - Detection hint: Inconsistent address format
-#
-# 8. X/Y COORDINATE PRECISION LOSS (10% of rows, ~50K affected)
-#    - x_coordinate and y_coordinate rounded to nearest 1000
-#    - Loses precision for geocoding
-#    - Applied to: x_coordinate, y_coordinate columns
-#    - Detection hint: Clustering on round numbers
-#
-# =============================================================================
+def corrupt_invoice_prefix(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'InvoiceNo') -> pd.DataFrame:
+    """Add various prefixes to invoice numbers."""
+    prefixes = ['INV_', '#', 'ORDER-', 'ORD']
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(str)
+    df.loc[mask, col] = df.loc[mask, col].apply(lambda x: f"{random.choice(prefixes)}{x}")
+    return df
 
-def corrupt_crimes_v1():
-    """500K rows - Geographic corruption"""
-    print("Creating Chicago Crimes V1 (500K rows)...")
-    df = pd.read_csv('raw/chicago_crimes_500k.csv')
-    print(f"  Loaded {len(df):,} rows")
 
-    # 1. Swapped lat/long (6%)
-    swap_mask = np.random.random(len(df)) < 0.06
-    lat_temp = df.loc[swap_mask, 'latitude'].copy()
-    df.loc[swap_mask, 'latitude'] = df.loc[swap_mask, 'longitude']
-    df.loc[swap_mask, 'longitude'] = lat_temp
-    print(f"    Swapped lat/long for {swap_mask.sum():,} rows")
+def corrupt_swap_coordinates(df: pd.DataFrame, pct: float, timeboxed: bool,
+                              lat_col: str = 'latitude', lon_col: str = 'longitude') -> pd.DataFrame:
+    """Swap latitude and longitude."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    lat_temp = df.loc[mask, lat_col].copy()
+    df.loc[mask, lat_col] = df.loc[mask, lon_col]
+    df.loc[mask, lon_col] = lat_temp
+    return df
 
-    # 2. Out of bounds (5%)
-    oob_mask = np.random.random(len(df)) < 0.05
-    df.loc[oob_mask, 'latitude'] = np.random.uniform(30, 50, size=oob_mask.sum())
-    df.loc[oob_mask, 'longitude'] = np.random.uniform(-100, -70, size=oob_mask.sum())
-    print(f"    Applied out-of-bounds coords to {oob_mask.sum():,} rows")
 
-    # 3. Zero coordinates (4%)
-    zero_mask = np.random.random(len(df)) < 0.04
-    df.loc[zero_mask, 'latitude'] = 0
-    df.loc[zero_mask, 'longitude'] = 0
-    print(f"    Applied zero coords to {zero_mask.sum():,} rows")
+def corrupt_out_of_bounds_coords(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                  lat_col: str = 'latitude', lon_col: str = 'longitude') -> pd.DataFrame:
+    """Set coordinates to out-of-bounds values."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, lat_col] = np.random.uniform(30, 50, size=mask.sum())
+    df.loc[mask, lon_col] = np.random.uniform(-100, -70, size=mask.sum())
+    return df
 
-    # 4. Systematic drug crime redaction (35% of drug crimes)
-    drug_mask = df['primary_type'].str.contains('NARCOTICS|DRUG', case=False, na=False)
-    redact_mask = drug_mask & (np.random.random(len(df)) < 0.35)
-    df.loc[redact_mask, 'latitude'] = np.nan
-    df.loc[redact_mask, 'longitude'] = np.nan
-    df.loc[redact_mask, 'block'] = 'REDACTED'
-    print(f"    Redacted location for {redact_mask.sum():,} drug crime rows")
 
-    # 5. Invalid districts (5%)
-    dist_mask = np.random.random(len(df)) < 0.05
-    df.loc[dist_mask, 'district'] = np.random.choice([0, -1, 99, 100], size=dist_mask.sum())
-    print(f"    Applied invalid districts to {dist_mask.sum():,} rows")
+def corrupt_zero_coordinates(df: pd.DataFrame, pct: float, timeboxed: bool,
+                              lat_col: str = 'latitude', lon_col: str = 'longitude') -> pd.DataFrame:
+    """Set coordinates to (0, 0) - null island."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, lat_col] = 0
+    df.loc[mask, lon_col] = 0
+    return df
 
-    # 6. Invalid wards (5%)
-    ward_mask = np.random.random(len(df)) < 0.05
-    df.loc[ward_mask, 'ward'] = np.random.choice([0, -1, 99, 100], size=ward_mask.sum())
-    print(f"    Applied invalid wards to {ward_mask.sum():,} rows")
 
-    # 7. Location string corruption (8%)
-    loc_str_mask = np.random.random(len(df)) < 0.08
+def corrupt_systematic_redaction(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                  filter_col: str = 'primary_type', filter_pattern: str = 'NARCOTICS|DRUG',
+                                  redact_cols: dict = None) -> pd.DataFrame:
+    """Systematically redact data for specific categories."""
+    if redact_cols is None:
+        redact_cols = {'latitude': np.nan, 'longitude': np.nan, 'block': 'REDACTED'}
+
+    type_mask = df[filter_col].str.contains(filter_pattern, case=False, na=False)
+    random_mask = apply_random_mask(df, pct, timeboxed)
+    combined_mask = type_mask & random_mask
+
+    for col, value in redact_cols.items():
+        df.loc[combined_mask, col] = value
+    return df
+
+
+def corrupt_location_suffix(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'block') -> pd.DataFrame:
+    """Add suffixes to location strings."""
     suffixes = [' (APPROX)', ' - VERIFIED', ' [REDACTED]', ' *', ' ???']
-    df['block'] = df['block'].astype(str)
-    df.loc[loc_str_mask, 'block'] = df.loc[loc_str_mask, 'block'].apply(
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(str)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: f"{x}{random.choice(suffixes)}" if pd.notna(x) else x
     )
-    print(f"    Applied location string corruption to {loc_str_mask.sum():,} rows")
-
-    # 8. X/Y precision loss (10%)
-    prec_mask = np.random.random(len(df)) < 0.10
-    df.loc[prec_mask, 'x_coordinate'] = (df.loc[prec_mask, 'x_coordinate'] / 1000).round() * 1000
-    df.loc[prec_mask, 'y_coordinate'] = (df.loc[prec_mask, 'y_coordinate'] / 1000).round() * 1000
-    print(f"    Applied X/Y precision loss to {prec_mask.sum():,} rows")
-
-    df.to_csv('corrupted/chicago_crimes_v1.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/chicago_crimes_v1.csv")
+    return df
 
 
-# =============================================================================
-# AIR QUALITY V1 - 250,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. UNIT INCONSISTENCIES (15% of rows, ~37K affected)
-#    - "Units of Measure" changed to various formats WITH VALUE CONVERSION
-#    - Base unit is µg/m³. Conversions applied:
-#      * 'µg/m³' -> factor 1 (no change)
-#      * 'ug/m3' -> factor 1 (ASCII variant, no change)
-#      * 'Micrograms/cubic meter' -> factor 1 (verbose, no change)
-#      * 'mg/m3' -> factor 0.001 (milligrams)
-#      * 'ng/m3' -> factor 1000 (nanograms)
-#    - Applied to: Units of Measure, Arithmetic Mean, 1st Max Value columns
-#    - Detection hint: Must normalize units to compare values
-#    - RECOVERABLE: Convert all values back to µg/m³ using inverse factors
-#
-# 2. NEGATIVE CONCENTRATIONS (5% of rows, ~12K affected)
-#    - Arithmetic Mean multiplied by -1
-#    - PM2.5 concentration can't be negative
-#    - Applied to: Arithmetic Mean column
-#    - Detection hint: Physically impossible negative value
-#
-# 3. INVALID AQI VALUES (4% of rows, ~10K affected)
-#    - AQI set to -10, 600, 999, or 1000
-#    - Valid range is 0-500
-#    - Applied to: AQI column
-#    - Detection hint: Domain violation
-#
-# 4. EXTREME MAX VALUES (3% of rows, ~7K affected)
-#    - "1st Max Value" set to 1000-10000
-#    - Normal PM2.5 max is 0-500 µg/m³
-#    - Applied to: 1st Max Value column
-#    - Detection hint: Statistical outlier
-#
-# 5. OBSERVATION PERCENT > 100 (4% of rows, ~10K affected)
-#    - Observation Percent set to 100.1-200
-#    - Logically impossible (max is 100%)
-#    - Applied to: Observation Percent column
-#    - Detection hint: Logical impossibility
-#
-# 6. INVALID STATE CODES (5% of rows, ~12K affected)
-#    - State Code set to 'XX', '99', '-1', 'NA'
-#    - Valid codes are 2-digit FIPS codes (01-56)
-#    - Applied to: State Code column
-#    - Detection hint: Invalid reference code
-#
-# 7. METHOD NAME MISMATCH (6% of rows, ~15K affected)
-#    - Method Name set to 'UNKNOWN METHOD' while keeping Method Code
-#    - Creates inconsistency between code and description
-#    - Applied to: Method Name column
-#    - Detection hint: Code/description mismatch
-#
-# 8. SITE NUM FORMAT INCONSISTENCY (8% of rows, ~20K affected)
-#    - Site Num format altered: leading zeros stripped, letters added
-#    - Creates: "0001" -> "1", "0042" -> "42A"
-#    - Applied to: Site Num column
-#    - Detection hint: Inconsistent site identifiers
-#
-# =============================================================================
+def corrupt_precision_loss(df: pd.DataFrame, pct: float, timeboxed: bool,
+                            cols: List[str] = None, round_to: int = 1000) -> pd.DataFrame:
+    """Round coordinates/values to lose precision."""
+    if cols is None:
+        cols = ['x_coordinate', 'y_coordinate']
+    mask = apply_random_mask(df, pct, timeboxed)
+    for col in cols:
+        df.loc[mask, col] = (df.loc[mask, col] / round_to).round() * round_to
+    return df
 
-def corrupt_airquality_v1():
-    """250K rows - Sensor and unit corruption"""
-    print("Creating Air Quality V1 (250K rows)...")
-    df = pd.read_csv('raw/air_quality_full.csv', low_memory=False)
-    # Sample to 250K
-    df = df.sample(n=250000, random_state=42)
-    print(f"  Sampled to {len(df):,} rows")
 
-    # 1. Unit inconsistencies (15%) - WITH PROPER VALUE CONVERSION (vectorized)
-    # Base unit is µg/m³. Define conversion factors from µg/m³ to target unit.
+def corrupt_unit_conversion(df: pd.DataFrame, pct: float, timeboxed: bool,
+                             unit_col: str = 'Units of Measure', value_cols: List[str] = None) -> pd.DataFrame:
+    """Change units WITH proper value conversion (recoverable)."""
+    if value_cols is None:
+        value_cols = ['Arithmetic Mean', '1st Max Value']
+
     unit_names = ['µg/m³', 'ug/m3', 'Micrograms/cubic meter', 'mg/m3', 'ng/m3']
     unit_factors = [1, 1, 1, 0.001, 1000]
 
-    unit_mask = np.random.random(len(df)) < 0.15
-    n_affected = unit_mask.sum()
+    mask = apply_random_mask(df, pct, timeboxed)
+    n_affected = mask.sum()
 
-    # Randomly assign unit indices to affected rows
     unit_indices = np.random.randint(0, len(unit_names), size=n_affected)
     chosen_units = [unit_names[i] for i in unit_indices]
     chosen_factors = np.array([unit_factors[i] for i in unit_indices])
 
-    # Apply unit labels
-    df.loc[unit_mask, 'Units of Measure'] = chosen_units
+    df.loc[mask, unit_col] = chosen_units
+    for col in value_cols:
+        df.loc[mask, col] = df.loc[mask, col].values * chosen_factors
 
-    # Apply conversion factors to values
-    df.loc[unit_mask, 'Arithmetic Mean'] = df.loc[unit_mask, 'Arithmetic Mean'].values * chosen_factors
-    df.loc[unit_mask, '1st Max Value'] = df.loc[unit_mask, '1st Max Value'].values * chosen_factors
-
-    print(f"    Applied unit inconsistencies (with conversion) to {n_affected:,} rows")
-
-    # 2. Negative concentrations (5%)
-    neg_mask = np.random.random(len(df)) < 0.05
-    df.loc[neg_mask, 'Arithmetic Mean'] = -abs(df.loc[neg_mask, 'Arithmetic Mean'])
-    print(f"    Applied negative concentrations to {neg_mask.sum():,} rows")
-
-    # 3. Invalid AQI (4%)
-    aqi_mask = np.random.random(len(df)) < 0.04
-    df.loc[aqi_mask, 'AQI'] = np.random.choice([-10, 600, 999, 1000], size=aqi_mask.sum())
-    print(f"    Applied invalid AQI to {aqi_mask.sum():,} rows")
-
-    # 4. Extreme max values (3%)
-    max_mask = np.random.random(len(df)) < 0.03
-    df.loc[max_mask, '1st Max Value'] = np.random.uniform(1000, 10000, size=max_mask.sum())
-    print(f"    Applied extreme max values to {max_mask.sum():,} rows")
-
-    # 5. Observation percent > 100 (4%)
-    df['Observation Percent'] = df['Observation Percent'].astype(float)
-    obs_mask = np.random.random(len(df)) < 0.04
-    df.loc[obs_mask, 'Observation Percent'] = np.random.uniform(100.1, 200, size=obs_mask.sum())
-    print(f"    Applied obs percent > 100 to {obs_mask.sum():,} rows")
-
-    # 6. Invalid state codes (5%)
-    df['State Code'] = df['State Code'].astype(object)
-    state_mask = np.random.random(len(df)) < 0.05
-    df.loc[state_mask, 'State Code'] = np.random.choice(['XX', '99', '-1', 'NA'], size=state_mask.sum())
-    print(f"    Applied invalid state codes to {state_mask.sum():,} rows")
-
-    # 7. Method name mismatch (6%)
-    method_mask = np.random.random(len(df)) < 0.06
-    df.loc[method_mask, 'Method Name'] = 'UNKNOWN METHOD'
-    print(f"    Applied method name mismatch to {method_mask.sum():,} rows")
-
-    # 8. Site num format (8%)
-    df['Site Num'] = df['Site Num'].astype(str)
-    site_mask = np.random.random(len(df)) < 0.08
-    df.loc[site_mask, 'Site Num'] = df.loc[site_mask, 'Site Num'].apply(
-        lambda x: str(int(float(x))).lstrip('0') + random.choice(['', 'A', 'B', '-1']) if pd.notna(x) else x
-    )
-    print(f"    Applied site num format issues to {site_mask.sum():,} rows")
-
-    df.to_csv('corrupted/air_quality_v1.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/air_quality_v1.csv")
+    return df
 
 
-# =============================================================================
-# CHICAGO CRIMES V2 - 100,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. DATE FORMAT CHAOS (30% of rows, ~30K affected)
-#    - Date converted to various formats
-#    - Formats: '%Y-%m-%d %H:%M:%S', '%m/%d/%Y %I:%M:%S %p', '%d-%m-%Y %H:%M'
-#    - Applied to: date column
-#    - Detection hint: Multiple datetime formats
-#
-# 2. CRIME TYPE MISMATCH (8% of rows, ~8K affected)
-#    - primary_type swapped to random different crime type
-#    - IUCR code no longer matches description
-#    - Applied to: primary_type column
-#    - Detection hint: IUCR/type inconsistency
-#
-# 3. BOOLEAN FORMAT INCONSISTENCY (20% of rows, ~20K affected)
-#    - arrest field set to: 'True', 'False', 'true', 'false', 'YES', 'NO', '1', '0'
-#    - Applied to: arrest column
-#    - Detection hint: Multiple boolean representations
-#
-# 4. DOMESTIC BOOLEAN INCONSISTENCY (20% of rows, ~20K affected)
-#    - domestic field set to same variety of boolean values
-#    - Applied to: domestic column
-#    - Detection hint: Multiple boolean representations
-#
-# 5. CASE NUMBER DUPLICATES WITH CONFLICTS (3% of rows, ~3K affected)
-#    - Same case_number, different arrest status
-#    - Same case_number, different district
-#    - Applied to: creates duplicate rows
-#    - Detection hint: Duplicate IDs with conflicting data
-#
-# 6. YEAR MISMATCH (6% of rows, ~6K affected)
-#    - year column doesn't match date column
-#    - year set to date year - random(1-5)
-#    - Applied to: year column
-#    - Detection hint: Derived field inconsistency
-#
-# 7. FBI CODE CORRUPTION (5% of rows, ~5K affected)
-#    - fbi_code set to invalid values
-#    - Values: 'XX', '00', 'UNKNOWN', ''
-#    - Applied to: fbi_code column
-#    - Detection hint: Invalid reference code
-#
-# 8. UPDATED_ON BEFORE DATE (4% of rows, ~4K affected)
-#    - updated_on timestamp set before crime date
-#    - Logically impossible
-#    - Applied to: updated_on column
-#    - Detection hint: Temporal logic violation
-#
-# =============================================================================
-
-def corrupt_crimes_v2():
-    """100K rows - Temporal and categorical corruption"""
-    print("Creating Chicago Crimes V2 (100K rows)...")
-    df = pd.read_csv('raw/chicago_crimes.csv')
-    print(f"  Loaded {len(df):,} rows")
-
-    # Convert date to string for manipulation
-    df['date'] = pd.to_datetime(df['date']).astype(str)
-
-    # 1. Date format chaos (30%)
-    formats = ['%Y-%m-%d %H:%M:%S', '%m/%d/%Y %I:%M:%S %p', '%d-%m-%Y %H:%M',
-               '%Y/%m/%d %H:%M:%S', '%m-%d-%Y %H:%M:%S']
-    date_mask = np.random.random(len(df)) < 0.30
-    df.loc[date_mask, 'date'] = df.loc[date_mask, 'date'].apply(
-        lambda x: pd.to_datetime(x).strftime(random.choice(formats)) if pd.notna(x) and x != 'NaT' else x
-    )
-    print(f"    Applied date format chaos to {date_mask.sum():,} rows")
-
-    # 2. Crime type mismatch (8%)
-    crime_types = df['primary_type'].dropna().unique()
-    type_mask = np.random.random(len(df)) < 0.08
-    df.loc[type_mask, 'primary_type'] = np.random.choice(crime_types, size=type_mask.sum())
-    print(f"    Applied crime type mismatch to {type_mask.sum():,} rows")
-
-    # 3. Boolean format - arrest (20%)
+def corrupt_boolean_format(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'arrest') -> pd.DataFrame:
+    """Use various boolean representations."""
     bool_values = ['True', 'False', 'true', 'false', 'YES', 'NO', '1', '0', 'Y', 'N']
-    df['arrest'] = df['arrest'].astype(object)
-    arrest_mask = np.random.random(len(df)) < 0.20
-    df.loc[arrest_mask, 'arrest'] = np.random.choice(bool_values, size=arrest_mask.sum())
-    print(f"    Applied arrest boolean chaos to {arrest_mask.sum():,} rows")
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(object)
+    df.loc[mask, col] = np.random.choice(bool_values, size=mask.sum())
+    return df
 
-    # 4. Boolean format - domestic (20%)
-    df['domestic'] = df['domestic'].astype(object)
-    domestic_mask = np.random.random(len(df)) < 0.20
-    df.loc[domestic_mask, 'domestic'] = np.random.choice(bool_values, size=domestic_mask.sum())
-    print(f"    Applied domestic boolean chaos to {domestic_mask.sum():,} rows")
 
-    # 5. Duplicate case numbers with conflicts (3%)
-    n_dupes = int(len(df) * 0.03)
+def corrupt_code_mismatch(df: pd.DataFrame, pct: float, timeboxed: bool,
+                           col: str = 'primary_type') -> pd.DataFrame:
+    """Swap values to create code/description mismatches."""
+    unique_values = df[col].dropna().unique()
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = np.random.choice(unique_values, size=mask.sum())
+    return df
+
+
+def corrupt_duplicate_with_conflict(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                     key_col: str = 'case_number', conflict_cols: dict = None) -> pd.DataFrame:
+    """Create duplicate keys with conflicting values."""
+    if conflict_cols is None:
+        conflict_cols = {'arrest': lambda x: 'False' if str(x).lower() in ['true', '1', 'yes', 'y'] else 'True',
+                         'district': lambda x: int(pd.to_numeric(x, errors='coerce') or 0) + 1}
+
+    n_dupes = int(len(df) * (pct / 100))
     dupe_idx = df.sample(n=n_dupes, random_state=42).index
     dupes = df.loc[dupe_idx].copy()
-    dupes['arrest'] = dupes['arrest'].apply(lambda x: 'False' if str(x).lower() in ['true', '1', 'yes', 'y'] else 'True')
-    dupes['district'] = pd.to_numeric(dupes['district'], errors='coerce').fillna(0).astype(int) + 1
+
+    for col, transform in conflict_cols.items():
+        dupes[col] = dupes[col].apply(transform)
+
     df = pd.concat([df, dupes], ignore_index=True)
-    print(f"    Added {n_dupes:,} duplicate case numbers with conflicts")
+    return df
 
-    # 6. Year mismatch (6%)
-    year_mask = np.random.random(len(df)) < 0.06
-    df.loc[year_mask, 'year'] = df.loc[year_mask, 'year'].apply(
-        lambda x: int(x) - random.randint(1, 5) if pd.notna(x) else x
+
+def corrupt_derived_field_mismatch(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                    col: str = 'year', offset_range: tuple = (1, 5)) -> pd.DataFrame:
+    """Make derived field not match source."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
+        lambda x: int(x) - random.randint(*offset_range) if pd.notna(x) else x
     )
-    print(f"    Applied year mismatch to {year_mask.sum():,} rows")
-
-    # 7. FBI code corruption (5%)
-    df['fbi_code'] = df['fbi_code'].astype(object)
-    fbi_mask = np.random.random(len(df)) < 0.05
-    df.loc[fbi_mask, 'fbi_code'] = np.random.choice(['XX', '00', 'UNKNOWN', ''], size=fbi_mask.sum())
-    print(f"    Applied FBI code corruption to {fbi_mask.sum():,} rows")
-
-    # 8. Updated before date (4%)
-    update_mask = np.random.random(len(df)) < 0.04
-    df.loc[update_mask, 'updated_on'] = df.loc[update_mask, 'date'].apply(
-        lambda x: (pd.to_datetime(x) - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d %H:%M:%S')
-        if pd.notna(x) and x != 'NaT' else x
-    )
-    print(f"    Applied updated_on before date to {update_mask.sum():,} rows")
-
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    df.to_csv('corrupted/chicago_crimes_v2.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/chicago_crimes_v2.csv")
+    return df
 
 
-# =============================================================================
-# NYC TAXI V2 - 50,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. EXACT DUPLICATES (5% of dataset, ~2.5K affected)
-#    - Complete row duplicates
-#    - Same trip appearing multiple times
-#    - Applied to: entire rows
-#    - Detection hint: Duplicate row detection
-#
-# 2. NEAR DUPLICATES (4% of dataset, ~2K affected)
-#    - Same trip, slightly different amounts
-#    - total_amount varied by ±$0.50
-#    - tip_amount varied by ±$0.25
-#    - Applied to: total_amount, tip_amount columns
-#    - Detection hint: Similar rows with minor variations
-#
-# 3. NULL VALUE VARIATIONS (8% per column, ~4K affected each)
-#    - Various null representations: '', 'NULL', 'None', 'N/A', 'null', 'NaN', '-'
-#    - Applied to: passenger_count, RatecodeID, payment_type, congestion_surcharge
-#    - Detection hint: Inconsistent null handling
-#
-# 4. INVALID LOCATION IDS (6% of rows, ~3K affected)
-#    - PULocationID set to 0, -1, 999, 9999
-#    - DOLocationID set to 0, -1, 888, 9999
-#    - Valid range: 1-265
-#    - Applied to: PULocationID, DOLocationID columns
-#    - Detection hint: Invalid foreign key references
-#
-# 5. VENDOR ID FORMAT INCONSISTENCY (7% of rows, ~3.5K affected)
-#    - VendorID converted to various formats
-#    - 1 -> '1', 'CMT', 'Creative Mobile', 'one'
-#    - 2 -> '2', 'VTS', 'VeriFone', 'two'
-#    - Applied to: VendorID column
-#    - Detection hint: Inconsistent categorical encoding
-#
-# 6. PAYMENT TYPE TEXT MIXING (6% of rows, ~3K affected)
-#    - Payment type mixed numeric/text
-#    - 1 -> 'Credit', 2 -> 'Cash', 3 -> 'No charge', 4 -> 'Dispute'
-#    - Applied to: payment_type column
-#    - Detection hint: Mixed encoding scheme
-#
-# 7. RATECODE CORRUPTION (5% of rows, ~2.5K affected)
-#    - RatecodeID set to invalid values: 0, 7, 99
-#    - Valid range: 1-6
-#    - Applied to: RatecodeID column
-#    - Detection hint: Domain violation
-#
-# 8. STORE AND FWD FLAG INCONSISTENCY (10% of rows, ~5K affected)
-#    - Flag set to various yes/no formats
-#    - 'Y', 'N', 'Yes', 'No', 'YES', 'NO', '1', '0', 'true', 'false'
-#    - Applied to: store_and_fwd_flag column
-#    - Detection hint: Boolean format chaos
-#
-# =============================================================================
+def corrupt_invalid_codes(df: pd.DataFrame, pct: float, timeboxed: bool,
+                           col: str = 'fbi_code', invalid_values: List[str] = None) -> pd.DataFrame:
+    """Set codes to invalid values."""
+    if invalid_values is None:
+        invalid_values = ['XX', '00', 'UNKNOWN', '']
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(object)
+    df.loc[mask, col] = np.random.choice(invalid_values, size=mask.sum())
+    return df
 
-def corrupt_taxi_v2():
-    """50K rows - Duplicates and null corruption"""
-    print("Creating NYC Taxi V2 (50K rows)...")
-    df = pd.read_csv('raw/nyc_taxi_jan2024.csv')
-    df = df.sample(n=50000, random_state=42)
-    print(f"  Sampled to {len(df):,} rows")
 
-    # 1. Exact duplicates (5%)
-    n_exact = int(len(df) * 0.05)
-    exact_dupes = df.sample(n=n_exact, random_state=42)
-    df = pd.concat([df, exact_dupes], ignore_index=True)
-    print(f"    Added {n_exact:,} exact duplicates")
+def corrupt_exact_duplicates(df: pd.DataFrame, pct: float, timeboxed: bool) -> pd.DataFrame:
+    """Add exact row duplicates."""
+    n_dupes = int(len(df) * (pct / 100))
+    dupes = df.sample(n=n_dupes, random_state=42)
+    df = pd.concat([df, dupes], ignore_index=True)
+    return df
 
-    # 2. Near duplicates (4%)
-    n_near = int(len(df) * 0.04)
-    near_dupes = df.sample(n=n_near, random_state=43).copy()
-    near_dupes['total_amount'] = near_dupes['total_amount'] + np.random.uniform(-0.5, 0.5, size=n_near)
-    near_dupes['tip_amount'] = near_dupes['tip_amount'] + np.random.uniform(-0.25, 0.25, size=n_near)
-    df = pd.concat([df, near_dupes], ignore_index=True)
-    print(f"    Added {n_near:,} near duplicates")
 
-    # 3. Null variations (8% per column)
+def corrupt_near_duplicates(df: pd.DataFrame, pct: float, timeboxed: bool,
+                             vary_cols: dict = None) -> pd.DataFrame:
+    """Add near-duplicate rows with slight variations."""
+    if vary_cols is None:
+        vary_cols = {'total_amount': (-0.5, 0.5), 'tip_amount': (-0.25, 0.25)}
+
+    n_dupes = int(len(df) * (pct / 100))
+    dupes = df.sample(n=n_dupes, random_state=43).copy()
+
+    for col, (low, high) in vary_cols.items():
+        if col in dupes.columns:
+            dupes[col] = dupes[col] + np.random.uniform(low, high, size=n_dupes)
+
+    df = pd.concat([df, dupes], ignore_index=True)
+    return df
+
+
+def corrupt_null_variations(df: pd.DataFrame, pct: float, timeboxed: bool,
+                             cols: List[str] = None) -> pd.DataFrame:
+    """Apply various null representations to multiple columns."""
     null_values = ['', 'NULL', 'None', 'N/A', 'null', 'NaN', '-', '.']
-    for col in ['passenger_count', 'RatecodeID', 'payment_type', 'congestion_surcharge']:
-        df[col] = df[col].astype(object)
-        null_mask = np.random.random(len(df)) < 0.08
-        df.loc[null_mask, col] = np.random.choice(null_values, size=null_mask.sum())
-        print(f"    Applied null variations to {col}: {null_mask.sum():,} rows")
+    if cols is None:
+        cols = ['passenger_count', 'RatecodeID', 'payment_type']
 
-    # 4. Invalid location IDs (6%)
-    loc_mask = np.random.random(len(df)) < 0.06
-    df.loc[loc_mask, 'PULocationID'] = np.random.choice([0, -1, 999, 9999], size=loc_mask.sum())
-    df.loc[loc_mask, 'DOLocationID'] = np.random.choice([0, -1, 888, 9999], size=loc_mask.sum())
-    print(f"    Applied invalid location IDs to {loc_mask.sum():,} rows")
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].astype(object)
+            mask = apply_random_mask(df, pct, timeboxed)
+            df.loc[mask, col] = np.random.choice(null_values, size=mask.sum())
 
-    # 5. Vendor ID format (7%)
-    df['VendorID'] = df['VendorID'].astype(object)
-    vendor_mask = np.random.random(len(df)) < 0.07
+    return df
+
+
+def corrupt_vendor_format(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'VendorID') -> pd.DataFrame:
+    """Mix numeric IDs with text representations."""
     vendor_map = {1: ['1', 'CMT', 'Creative Mobile', 'one'],
                   2: ['2', 'VTS', 'VeriFone', 'two']}
-    df.loc[vendor_mask, 'VendorID'] = df.loc[vendor_mask, 'VendorID'].apply(
-        lambda x: random.choice(vendor_map.get(int(x) if pd.notna(x) and x != '' else 0, [x])) if pd.notna(x) else x
+    mask = apply_random_mask(df, pct, timeboxed)
+    df[col] = df[col].astype(object)
+    df.loc[mask, col] = df.loc[mask, col].apply(
+        lambda x: random.choice(vendor_map.get(int(x) if pd.notna(x) and str(x).isdigit() else 0, [x]))
+        if pd.notna(x) else x
     )
-    print(f"    Applied vendor ID format issues to {vendor_mask.sum():,} rows")
+    return df
 
-    # 6. Payment type text mixing (6%)
-    pay_mask = np.random.random(len(df)) < 0.06
+
+def corrupt_payment_type_text(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'payment_type') -> pd.DataFrame:
+    """Mix numeric codes with text descriptions."""
     pay_map = {1: 'Credit', 2: 'Cash', 3: 'No charge', 4: 'Dispute', 5: 'Unknown', 6: 'Voided'}
-    df.loc[pay_mask, 'payment_type'] = df.loc[pay_mask, 'payment_type'].apply(
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: pay_map.get(int(x) if pd.notna(x) and str(x).isdigit() else 0, x)
     )
-    print(f"    Applied payment type text mixing to {pay_mask.sum():,} rows")
-
-    # 7. Ratecode corruption (5%)
-    rate_mask = np.random.random(len(df)) < 0.05
-    df.loc[rate_mask, 'RatecodeID'] = np.random.choice([0, 7, 99, -1], size=rate_mask.sum())
-    print(f"    Applied ratecode corruption to {rate_mask.sum():,} rows")
-
-    # 8. Store and fwd flag inconsistency (10%)
-    flag_values = ['Y', 'N', 'Yes', 'No', 'YES', 'NO', '1', '0', 'true', 'false']
-    df['store_and_fwd_flag'] = df['store_and_fwd_flag'].astype(object)
-    flag_mask = np.random.random(len(df)) < 0.10
-    df.loc[flag_mask, 'store_and_fwd_flag'] = np.random.choice(flag_values, size=flag_mask.sum())
-    print(f"    Applied store_and_fwd_flag inconsistency to {flag_mask.sum():,} rows")
-
-    df = df.sample(frac=1, random_state=44).reset_index(drop=True)
-    df.to_csv('corrupted/nyc_taxi_v2.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/nyc_taxi_v2.csv")
+    return df
 
 
-# =============================================================================
-# ONLINE RETAIL V2 - 25,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. NEGATIVE QUANTITIES WITHOUT CANCELLATION (8% of rows, ~2K affected)
-#    - Quantity set to negative for non-cancelled orders
-#    - Cancelled orders start with 'C' in InvoiceNo
-#    - Applied to: Quantity column
-#    - Detection hint: Business logic violation
-#
-# 2. ZERO PRICES (6% of rows, ~1.5K affected)
-#    - UnitPrice set to 0
-#    - Valid transactions should have price > 0
-#    - Applied to: UnitPrice column
-#    - Detection hint: Invalid pricing
-#
-# 3. EXTREME PRICES (3% of rows, ~750 affected)
-#    - UnitPrice set to 10,000-999,999
-#    - Normal range is typically 0.01-500
-#    - Applied to: UnitPrice column
-#    - Detection hint: Statistical outlier
-#
-# 4. FUTURE INVOICE DATES (4% of rows, ~1K affected)
-#    - InvoiceDate set to 2026
-#    - Data is from 2010-2011
-#    - Applied to: InvoiceDate column
-#    - Detection hint: Temporal impossibility
-#
-# 5. INVALID CUSTOMER IDS (7% of rows, ~1.75K affected)
-#    - CustomerID set to 'GUEST', 'UNKNOWN', 'TEST', '-1', 'NULL', '0'
-#    - Should be numeric
-#    - Applied to: CustomerID column
-#    - Detection hint: Invalid foreign key
-#
-# 6. QUANTITY/PRICE MATH ERRORS (5% of rows, ~1.25K affected)
-#    - Introduced calculated "LineTotal" column
-#    - LineTotal != Quantity * UnitPrice (off by random amount)
-#    - Applied to: new LineTotal column
-#    - Detection hint: Calculation verification failure
-#
-# 7. DUPLICATE INVOICES WITH DIFFERENT ITEMS (4% of rows, ~1K affected)
-#    - Same InvoiceNo assigned to different rows
-#    - Creates referential ambiguity
-#    - Applied to: InvoiceNo column
-#    - Detection hint: Duplicate key with different values
-#
-# 8. COUNTRY CODE MIX (6% of rows, ~1.5K affected)
-#    - Country replaced with ISO codes mixed with names
-#    - 'United Kingdom' -> 'UK', 'GB', 'GBR'
-#    - 'France' -> 'FR', 'FRA'
-#    - Applied to: Country column
-#    - Detection hint: Inconsistent country encoding
-#
-# =============================================================================
-
-def corrupt_retail_v2():
-    """25K rows - Business logic corruption"""
-    print("Creating Online Retail V2 (25K rows)...")
-    df = pd.read_csv('raw/online_retail.csv')
-    df = df.sample(n=25000, random_state=42)
-    print(f"  Sampled to {len(df):,} rows")
-
-    # 1. Negative quantities for non-cancelled (8%)
-    df['InvoiceNo'] = df['InvoiceNo'].astype(str)
-    invoice_not_cancel = ~df['InvoiceNo'].str.startswith('C')
-    neg_qty_mask = (np.random.random(len(df)) < 0.08) & invoice_not_cancel
-    df.loc[neg_qty_mask, 'Quantity'] = -abs(df.loc[neg_qty_mask, 'Quantity'])
-    print(f"    Applied negative quantities to {neg_qty_mask.sum():,} rows")
-
-    # 2. Zero prices (6%)
-    zero_price_mask = np.random.random(len(df)) < 0.06
-    df.loc[zero_price_mask, 'UnitPrice'] = 0
-    print(f"    Applied zero prices to {zero_price_mask.sum():,} rows")
-
-    # 3. Extreme prices (3%)
-    extreme_mask = np.random.random(len(df)) < 0.03
-    df.loc[extreme_mask, 'UnitPrice'] = np.random.uniform(10000, 999999, size=extreme_mask.sum())
-    print(f"    Applied extreme prices to {extreme_mask.sum():,} rows")
-
-    # 4. Future dates (4%)
-    df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate']).astype(str)
-    future_mask = np.random.random(len(df)) < 0.04
-    future_dates = pd.date_range(start='2026-01-01', periods=future_mask.sum(), freq='h').strftime('%Y-%m-%d %H:%M:%S')
-    df.loc[future_mask, 'InvoiceDate'] = list(future_dates)
-    print(f"    Applied future dates to {future_mask.sum():,} rows")
-
-    # 5. Invalid customer IDs (7%)
-    df['CustomerID'] = df['CustomerID'].astype(object)
-    cust_mask = np.random.random(len(df)) < 0.07
-    invalid_ids = ['GUEST', 'UNKNOWN', 'TEST', '-1', 'NULL', '0']
-    df.loc[cust_mask, 'CustomerID'] = np.random.choice(invalid_ids, size=cust_mask.sum())
-    print(f"    Applied invalid customer IDs to {cust_mask.sum():,} rows")
-
-    # 6. Math errors - add LineTotal with errors (5%)
-    df['LineTotal'] = df['Quantity'] * df['UnitPrice']
-    math_mask = np.random.random(len(df)) < 0.05
-    df.loc[math_mask, 'LineTotal'] = df.loc[math_mask, 'LineTotal'] + np.random.uniform(-10, 10, size=math_mask.sum())
-    print(f"    Applied math errors to {math_mask.sum():,} rows")
-
-    # 7. Duplicate invoices (4%)
-    dupe_inv_mask = np.random.random(len(df)) < 0.04
-    existing_invoices = df.loc[~dupe_inv_mask, 'InvoiceNo'].dropna().unique()
-    if len(existing_invoices) > 0:
-        df.loc[dupe_inv_mask, 'InvoiceNo'] = np.random.choice(existing_invoices, size=dupe_inv_mask.sum())
-    print(f"    Applied duplicate invoices to {dupe_inv_mask.sum():,} rows")
-
-    # 8. Country code mix (6%)
+def corrupt_country_codes(df: pd.DataFrame, pct: float, timeboxed: bool, col: str = 'Country') -> pd.DataFrame:
+    """Mix country names with ISO codes."""
     country_map = {
         'United Kingdom': ['UK', 'GB', 'GBR', 'Britain'],
         'France': ['FR', 'FRA', 'FRANCE'],
@@ -924,191 +461,476 @@ def corrupt_retail_v2():
         'Spain': ['ES', 'ESP', 'SPAIN'],
         'Netherlands': ['NL', 'NLD', 'NETHERLANDS']
     }
-    country_mask = np.random.random(len(df)) < 0.06
-    df.loc[country_mask, 'Country'] = df.loc[country_mask, 'Country'].apply(
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, col] = df.loc[mask, col].apply(
         lambda x: random.choice(country_map.get(x, [x])) if pd.notna(x) else x
     )
-    print(f"    Applied country code mix to {country_mask.sum():,} rows")
-
-    df.to_csv('corrupted/online_retail_v2.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/online_retail_v2.csv")
+    return df
 
 
-# =============================================================================
-# AIR QUALITY V2 - 10,000 ROWS
-# =============================================================================
-#
-# CORRUPTION MANIFEST:
-#
-# 1. DATE FORMAT CHAOS (25% of rows, ~2.5K affected)
-#    - Date Local converted to various formats
-#    - Formats: '%Y-%m-%d', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d'
-#    - Applied to: Date Local column
-#    - Detection hint: Multiple date formats
-#
-# 2. FUTURE DATES (3% of rows, ~300 affected)
-#    - Date set to 2026
-#    - Data is from 2023
-#    - Applied to: Date Local column
-#    - Detection hint: Temporal impossibility
-#
-# 3. COORDINATE PRECISION LOSS (12% of rows, ~1.2K affected)
-#    - Latitude and Longitude rounded to 1 decimal
-#    - Loses precision for location matching
-#    - Applied to: Latitude, Longitude columns
-#    - Detection hint: Clustering on round coordinates
-#
-# 4. STATE NAME/CODE MISMATCH (8% of rows, ~800 affected)
-#    - State Name swapped to different state
-#    - State Code no longer matches State Name
-#    - Applied to: State Name column
-#    - Detection hint: Reference inconsistency
-#
-# 5. EXACT DUPLICATES (4% of dataset, ~400 affected)
-#    - Complete row duplicates
-#    - Applied to: entire rows
-#    - Detection hint: Duplicate records
-#
-# 6. NEAR DUPLICATE READINGS (5% of dataset, ~500 affected)
-#    - Same site, same day, slightly different readings
-#    - Arithmetic Mean varied by ±10%
-#    - AQI varied by ±5
-#    - Applied to: Arithmetic Mean, AQI columns
-#    - Detection hint: Conflicting readings
-#
-# 7. CBSA NAME INCONSISTENCY (10% of rows, ~1K affected)
-#    - CBSA Name case/format variations
-#    - 'Los Angeles-Long Beach-Anaheim, CA' vs 'LOS ANGELES LONG BEACH ANAHEIM CA'
-#    - Applied to: CBSA Name column
-#    - Detection hint: String normalization needed
-#
-# 8. COUNTY CODE/NAME MISMATCH (6% of rows, ~600 affected)
-#    - County Name swapped to different county
-#    - County Code no longer matches
-#    - Applied to: County Name column
-#    - Detection hint: Reference inconsistency
-#
-# =============================================================================
+def corrupt_math_errors(df: pd.DataFrame, pct: float, timeboxed: bool,
+                         qty_col: str = 'Quantity', price_col: str = 'UnitPrice', total_col: str = 'LineTotal') -> pd.DataFrame:
+    """Add calculated column with errors."""
+    df[total_col] = df[qty_col] * df[price_col]
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, total_col] = df.loc[mask, total_col] + np.random.uniform(-10, 10, size=mask.sum())
+    return df
 
-def corrupt_airquality_v2():
-    """10K rows - Temporal and geographic corruption"""
-    print("Creating Air Quality V2 (10K rows)...")
-    df = pd.read_csv('raw/air_quality_full.csv', low_memory=False)
-    df = df.sample(n=10000, random_state=42)
-    print(f"  Sampled to {len(df):,} rows")
 
-    # 1. Date format chaos (25%)
-    formats = ['%Y-%m-%d', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d']
-    date_mask = np.random.random(len(df)) < 0.25
-    df.loc[date_mask, 'Date Local'] = df.loc[date_mask, 'Date Local'].apply(
-        lambda x: pd.to_datetime(x).strftime(random.choice(formats)) if pd.notna(x) else x
-    )
-    print(f"    Applied date format chaos to {date_mask.sum():,} rows")
-
-    # 2. Future dates (3%)
-    future_mask = np.random.random(len(df)) < 0.03
-    future_dates = pd.date_range(start='2026-01-01', periods=future_mask.sum(), freq='D').strftime('%Y-%m-%d')
-    df.loc[future_mask, 'Date Local'] = list(future_dates)
-    print(f"    Applied future dates to {future_mask.sum():,} rows")
-
-    # 3. Coordinate precision loss (12%)
-    coord_mask = np.random.random(len(df)) < 0.12
-    df.loc[coord_mask, 'Latitude'] = df.loc[coord_mask, 'Latitude'].apply(
-        lambda x: round(x, 1) if pd.notna(x) else x
-    )
-    df.loc[coord_mask, 'Longitude'] = df.loc[coord_mask, 'Longitude'].apply(
-        lambda x: round(x, 1) if pd.notna(x) else x
-    )
-    print(f"    Applied coordinate precision loss to {coord_mask.sum():,} rows")
-
-    # 4. State name/code mismatch (8%)
-    states = df['State Name'].dropna().unique()
-    state_mask = np.random.random(len(df)) < 0.08
-    df.loc[state_mask, 'State Name'] = np.random.choice(states, size=state_mask.sum())
-    print(f"    Applied state name mismatch to {state_mask.sum():,} rows")
-
-    # 5. Exact duplicates (4%)
-    n_dupes = int(len(df) * 0.04)
-    dupes = df.sample(n=n_dupes, random_state=42)
-    df = pd.concat([df, dupes], ignore_index=True)
-    print(f"    Added {n_dupes:,} exact duplicates")
-
-    # 6. Near duplicates (5%)
-    n_near = int(len(df) * 0.05)
-    near_dupes = df.sample(n=n_near, random_state=43).copy()
-    near_dupes['Arithmetic Mean'] = near_dupes['Arithmetic Mean'] * np.random.uniform(0.9, 1.1, size=n_near)
-    near_dupes['AQI'] = near_dupes['AQI'] + np.random.randint(-5, 5, size=n_near)
-    df = pd.concat([df, near_dupes], ignore_index=True)
-    print(f"    Added {n_near:,} near duplicates")
-
-    # 7. CBSA name inconsistency (10%)
-    cbsa_mask = np.random.random(len(df)) < 0.10
-    df.loc[cbsa_mask, 'CBSA Name'] = df.loc[cbsa_mask, 'CBSA Name'].apply(
-        lambda x: str(x).upper().replace('-', ' ').replace(',', '') if pd.notna(x) and random.random() > 0.5 else (
-            str(x).lower() if pd.notna(x) else x
-        )
-    )
-    print(f"    Applied CBSA name inconsistency to {cbsa_mask.sum():,} rows")
-
-    # 8. County name mismatch (6%)
-    counties = df['County Name'].dropna().unique()
-    county_mask = np.random.random(len(df)) < 0.06
-    df.loc[county_mask, 'County Name'] = np.random.choice(counties, size=county_mask.sum())
-    print(f"    Applied county name mismatch to {county_mask.sum():,} rows")
-
-    df = df.sample(frac=1, random_state=45).reset_index(drop=True)
-    df.to_csv('corrupted/air_quality_v2.csv', index=False)
-    print(f"  Saved {len(df):,} rows to corrupted/air_quality_v2.csv")
+def corrupt_coordinate_precision(df: pd.DataFrame, pct: float, timeboxed: bool,
+                                  lat_col: str = 'Latitude', lon_col: str = 'Longitude', decimals: int = 1) -> pd.DataFrame:
+    """Round coordinates to lose precision."""
+    mask = apply_random_mask(df, pct, timeboxed)
+    df.loc[mask, lat_col] = df.loc[mask, lat_col].apply(lambda x: round(x, decimals) if pd.notna(x) else x)
+    df.loc[mask, lon_col] = df.loc[mask, lon_col].apply(lambda x: round(x, decimals) if pd.notna(x) else x)
+    return df
 
 
 # =============================================================================
-# MAIN
+# DATASET CORRUPTION DEFINITIONS
 # =============================================================================
+
+def get_taxi_v1_corruptions():
+    """Define corruptions for NYC Taxi V1 (large dataset)."""
+    return [
+        # Standard corruptions
+        Corruption("timestamp_format", "Mixed datetime formats", 25,
+                   lambda df, pct, tb: corrupt_timestamp_format(df, pct, tb, 'tpep_pickup_datetime')),
+        Corruption("future_timestamps", "Dates in 2026", 3,
+                   lambda df, pct, tb: corrupt_future_timestamps(df, pct, tb, 'tpep_pickup_datetime')),
+        Corruption("negative_fares", "Negative fare amounts", 5,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, tb, 'fare_amount')),
+        Corruption("negative_distances", "Negative trip distances", 4,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, tb, 'trip_distance')),
+        Corruption("impossible_passengers", "Invalid passenger counts", 3,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'passenger_count', [-1, -2, 15, 99, 127])),
+        Corruption("precision_artifacts", "Floating point artifacts", 8,
+                   lambda df, pct, tb: corrupt_precision_artifacts(df, pct, tb, 'total_amount')),
+        Corruption("zero_distance_high_fare", "Zero distance with high fare", 2,
+                   lambda df, pct, tb: corrupt_zero_with_conflict(df, pct, tb, 'trip_distance', 'fare_amount')),
+        Corruption("invalid_location_ids", "Invalid pickup/dropoff IDs", 2,
+                   lambda df, pct, tb: corrupt_invalid_ids(df, pct, tb, ['PULocationID', 'DOLocationID'])),
+
+        # Rare corruptions
+        Corruption("extreme_outlier_fares", "Fares $10K-$1M", 0.5,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'fare_amount'),
+                   corruption_type=CorruptionType.RARE),
+        Corruption("dropoff_before_pickup", "Time travel (dropoff < pickup)", 1.5,
+                   lambda df, pct, tb: corrupt_temporal_logic(df, pct, tb),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed corruptions
+        Corruption("holiday_surge_format", "Holiday period format change", 5,
+                   lambda df, pct, tb: corrupt_timestamp_format(df, pct, True, 'tpep_pickup_datetime'),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_retail_v1_corruptions():
+    """Define corruptions for Online Retail V1."""
+    return [
+        Corruption("special_chars", "Special characters in descriptions", 10,
+                   lambda df, pct, tb: corrupt_special_chars(df, pct, tb, 'Description')),
+        Corruption("whitespace", "Leading/trailing whitespace", 15,
+                   lambda df, pct, tb: corrupt_whitespace(df, pct, tb, 'Description')),
+        Corruption("case_inconsistency", "Country case variations", 20,
+                   lambda df, pct, tb: corrupt_case_inconsistency(df, pct, tb, 'Country')),
+        Corruption("stockcode_format", "StockCode format issues", 12,
+                   lambda df, pct, tb: corrupt_id_format(df, pct, tb, 'StockCode')),
+        Corruption("embedded_quotes", "Extra quotes in descriptions", 6,
+                   lambda df, pct, tb: corrupt_embedded_quotes(df, pct, tb, 'Description')),
+        Corruption("null_descriptions", "Various NULL representations", 8,
+                   lambda df, pct, tb: corrupt_null_strings(df, pct, tb, 'Description')),
+        Corruption("negative_prices", "Negative unit prices", 5,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, tb, 'UnitPrice')),
+        Corruption("invoice_format", "Invoice number prefixes", 4,
+                   lambda df, pct, tb: corrupt_invoice_prefix(df, pct, tb, 'InvoiceNo')),
+
+        # Rare
+        Corruption("extreme_quantities", "Extreme quantity values", 0.5,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'Quantity', -10000, 10000),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - simulating a bad data import batch
+        Corruption("bad_batch_encoding", "Batch with encoding issues", 8,
+                   lambda df, pct, tb: corrupt_special_chars(df, pct, True, 'Description'),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_crimes_v1_corruptions():
+    """Define corruptions for Chicago Crimes V1."""
+    return [
+        Corruption("swapped_coords", "Swapped lat/long", 6,
+                   lambda df, pct, tb: corrupt_swap_coordinates(df, pct, tb)),
+        Corruption("out_of_bounds", "Coordinates outside Chicago", 5,
+                   lambda df, pct, tb: corrupt_out_of_bounds_coords(df, pct, tb)),
+        Corruption("zero_coords", "Null island (0,0)", 4,
+                   lambda df, pct, tb: corrupt_zero_coordinates(df, pct, tb)),
+        Corruption("drug_redaction", "Drug crime location redaction", 35,
+                   lambda df, pct, tb: corrupt_systematic_redaction(df, pct, tb)),
+        Corruption("invalid_districts", "Invalid district codes", 5,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'district', [0, -1, 99, 100])),
+        Corruption("invalid_wards", "Invalid ward codes", 5,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'ward', [0, -1, 99, 100])),
+        Corruption("location_suffixes", "Location string corruption", 8,
+                   lambda df, pct, tb: corrupt_location_suffix(df, pct, tb, 'block')),
+        Corruption("xy_precision_loss", "X/Y coordinate rounding", 10,
+                   lambda df, pct, tb: corrupt_precision_loss(df, pct, tb)),
+
+        # Rare
+        Corruption("completely_wrong_coords", "Coords in wrong country", 0.5,
+                   lambda df, pct, tb: corrupt_out_of_bounds_coords(df, pct, tb),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - simulating GPS outage
+        Corruption("gps_outage", "Period of zero coordinates", 3,
+                   lambda df, pct, tb: corrupt_zero_coordinates(df, pct, True),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_airquality_v1_corruptions():
+    """Define corruptions for Air Quality V1."""
+    return [
+        Corruption("unit_conversion", "Unit changes with value conversion", 15,
+                   lambda df, pct, tb: corrupt_unit_conversion(df, pct, tb)),
+        Corruption("negative_concentrations", "Negative readings", 5,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, tb, 'Arithmetic Mean')),
+        Corruption("invalid_aqi", "AQI outside 0-500 range", 4,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'AQI', [-10, 600, 999, 1000])),
+        Corruption("extreme_max", "Extreme 1st Max Values", 3,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, '1st Max Value', 1000, 10000)),
+        Corruption("obs_percent_over_100", "Observation % > 100", 4,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'Observation Percent', 100.1, 200)),
+        Corruption("invalid_state_codes", "Invalid state codes", 5,
+                   lambda df, pct, tb: corrupt_invalid_codes(df, pct, tb, 'State Code', ['XX', '99', '-1', 'NA'])),
+        Corruption("method_mismatch", "Unknown method names", 6,
+                   lambda df, pct, tb: corrupt_null_strings(df, pct, tb, 'Method Name')),
+        Corruption("site_num_format", "Site number format issues", 8,
+                   lambda df, pct, tb: corrupt_id_format(df, pct, tb, 'Site Num')),
+
+        # Rare - sensor malfunction
+        Corruption("sensor_spike", "Extreme sensor spike", 0.5,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'Arithmetic Mean', 500, 2000),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - calibration period
+        Corruption("calibration_period", "Sensor calibration errors", 5,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, True, 'Arithmetic Mean'),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_crimes_v2_corruptions():
+    """Define corruptions for Chicago Crimes V2."""
+    return [
+        Corruption("date_format_chaos", "Mixed date formats", 30,
+                   lambda df, pct, tb: corrupt_timestamp_format(df, pct, tb, 'date')),
+        Corruption("crime_type_mismatch", "Type doesn't match IUCR", 8,
+                   lambda df, pct, tb: corrupt_code_mismatch(df, pct, tb, 'primary_type')),
+        Corruption("arrest_boolean_chaos", "Mixed boolean formats (arrest)", 20,
+                   lambda df, pct, tb: corrupt_boolean_format(df, pct, tb, 'arrest')),
+        Corruption("domestic_boolean_chaos", "Mixed boolean formats (domestic)", 20,
+                   lambda df, pct, tb: corrupt_boolean_format(df, pct, tb, 'domestic')),
+        Corruption("duplicate_case_numbers", "Duplicate keys with conflicts", 3,
+                   lambda df, pct, tb: corrupt_duplicate_with_conflict(df, pct, tb)),
+        Corruption("year_mismatch", "Year doesn't match date", 6,
+                   lambda df, pct, tb: corrupt_derived_field_mismatch(df, pct, tb, 'year')),
+        Corruption("fbi_code_corruption", "Invalid FBI codes", 5,
+                   lambda df, pct, tb: corrupt_invalid_codes(df, pct, tb, 'fbi_code')),
+
+        # Rare
+        Corruption("updated_before_date", "Update timestamp before crime", 1,
+                   lambda df, pct, tb: corrupt_temporal_logic(df, pct, tb, 'date', 'updated_on'),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - system migration
+        Corruption("system_migration", "Period with different format", 10,
+                   lambda df, pct, tb: corrupt_timestamp_format(df, pct, True, 'date'),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_taxi_v2_corruptions():
+    """Define corruptions for NYC Taxi V2."""
+    return [
+        Corruption("exact_duplicates", "Complete row duplicates", 5,
+                   lambda df, pct, tb: corrupt_exact_duplicates(df, pct, tb)),
+        Corruption("near_duplicates", "Near-duplicate trips", 4,
+                   lambda df, pct, tb: corrupt_near_duplicates(df, pct, tb)),
+        Corruption("null_variations", "Various NULL strings", 8,
+                   lambda df, pct, tb: corrupt_null_variations(df, pct, tb, ['passenger_count', 'RatecodeID', 'payment_type', 'congestion_surcharge'])),
+        Corruption("invalid_locations", "Invalid location IDs", 6,
+                   lambda df, pct, tb: corrupt_invalid_ids(df, pct, tb, ['PULocationID', 'DOLocationID'], [0, -1, 999, 9999])),
+        Corruption("vendor_format", "Mixed vendor ID formats", 7,
+                   lambda df, pct, tb: corrupt_vendor_format(df, pct, tb)),
+        Corruption("payment_type_text", "Mixed payment type formats", 6,
+                   lambda df, pct, tb: corrupt_payment_type_text(df, pct, tb)),
+        Corruption("ratecode_corruption", "Invalid rate codes", 5,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'RatecodeID', [0, 7, 99, -1])),
+        Corruption("store_fwd_flag_chaos", "Mixed boolean flag formats", 10,
+                   lambda df, pct, tb: corrupt_boolean_format(df, pct, tb, 'store_and_fwd_flag')),
+
+        # Rare
+        Corruption("ghost_trips", "Zero everything", 0.5,
+                   lambda df, pct, tb: corrupt_zero_with_conflict(df, pct, tb, 'trip_distance', 'total_amount'),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - meter recalibration
+        Corruption("meter_recalibration", "Period of duplicate entries", 3,
+                   lambda df, pct, tb: corrupt_exact_duplicates(df, pct, True),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_retail_v2_corruptions():
+    """Define corruptions for Online Retail V2."""
+    return [
+        Corruption("negative_qty_non_cancel", "Negative qty for non-cancelled", 8,
+                   lambda df, pct, tb: corrupt_negative_values(df, pct, tb, 'Quantity')),
+        Corruption("zero_prices", "Zero unit prices", 6,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, tb, 'UnitPrice', [0])),
+        Corruption("extreme_prices", "Extreme prices ($10K+)", 3,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'UnitPrice', 10000, 999999)),
+        Corruption("future_dates", "Invoice dates in 2026", 4,
+                   lambda df, pct, tb: corrupt_future_timestamps(df, pct, tb, 'InvoiceDate')),
+        Corruption("invalid_customer_ids", "Invalid customer IDs", 7,
+                   lambda df, pct, tb: corrupt_invalid_codes(df, pct, tb, 'CustomerID', ['GUEST', 'UNKNOWN', 'TEST', '-1', 'NULL', '0'])),
+        Corruption("math_errors", "LineTotal calculation errors", 5,
+                   lambda df, pct, tb: corrupt_math_errors(df, pct, tb)),
+        Corruption("country_code_mix", "Mixed country codes/names", 6,
+                   lambda df, pct, tb: corrupt_country_codes(df, pct, tb)),
+
+        # Rare
+        Corruption("duplicate_invoices", "Duplicate invoice numbers", 1,
+                   lambda df, pct, tb: corrupt_duplicate_with_conflict(df, pct, tb, 'InvoiceNo', {}),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - holiday sale glitch
+        Corruption("holiday_glitch", "Period of zero prices", 2,
+                   lambda df, pct, tb: corrupt_impossible_values(df, pct, True, 'UnitPrice', [0]),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+def get_airquality_v2_corruptions():
+    """Define corruptions for Air Quality V2."""
+    return [
+        Corruption("date_format_chaos", "Mixed date formats", 25,
+                   lambda df, pct, tb: corrupt_timestamp_format(df, pct, tb, 'Date Local')),
+        Corruption("future_dates", "Dates in 2026", 3,
+                   lambda df, pct, tb: corrupt_future_timestamps(df, pct, tb, 'Date Local')),
+        Corruption("coord_precision_loss", "Rounded coordinates", 12,
+                   lambda df, pct, tb: corrupt_coordinate_precision(df, pct, tb)),
+        Corruption("state_name_mismatch", "State name doesn't match code", 8,
+                   lambda df, pct, tb: corrupt_code_mismatch(df, pct, tb, 'State Name')),
+        Corruption("exact_duplicates", "Complete row duplicates", 4,
+                   lambda df, pct, tb: corrupt_exact_duplicates(df, pct, tb)),
+        Corruption("near_duplicates", "Near-duplicate readings", 5,
+                   lambda df, pct, tb: corrupt_near_duplicates(df, pct, tb, {'Arithmetic Mean': (-2, 2), 'AQI': (-5, 5)})),
+        Corruption("cbsa_inconsistency", "CBSA name formatting", 10,
+                   lambda df, pct, tb: corrupt_case_inconsistency(df, pct, tb, 'CBSA Name')),
+        Corruption("county_mismatch", "County name doesn't match code", 6,
+                   lambda df, pct, tb: corrupt_code_mismatch(df, pct, tb, 'County Name')),
+
+        # Rare
+        Corruption("extreme_reading", "Extreme AQI reading", 0.5,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, tb, 'AQI', 400, 600),
+                   corruption_type=CorruptionType.RARE),
+
+        # Timeboxed - wildfire season
+        Corruption("wildfire_season", "Period of high readings", 5,
+                   lambda df, pct, tb: corrupt_extreme_outliers(df, pct, True, 'Arithmetic Mean', 50, 200),
+                   corruption_type=CorruptionType.TIMEBOXED),
+    ]
+
+
+# =============================================================================
+# MAIN CORRUPTION ENGINE
+# =============================================================================
+
+def apply_corruptions(df: pd.DataFrame, corruptions: List[Corruption], args) -> pd.DataFrame:
+    """Apply selected corruptions to a dataframe."""
+    # Filter corruptions based on options
+    available = [c for c in corruptions if c.corruption_type == CorruptionType.STANDARD]
+
+    if args.include_rare:
+        available += [c for c in corruptions if c.corruption_type == CorruptionType.RARE]
+
+    if args.include_timeboxed:
+        available += [c for c in corruptions if c.corruption_type == CorruptionType.TIMEBOXED]
+
+    # Randomize selection if requested
+    if args.randomize:
+        n_corruptions = random.randint(1, min(8, len(available)))
+        selected = random.sample(available, n_corruptions)
+        print(f"    Randomly selected {n_corruptions} corruptions")
+    else:
+        selected = available
+
+    # Apply each corruption
+    for corruption in selected:
+        # Scale percentage
+        pct = corruption.base_percentage * args.scale
+
+        # Determine if this specific corruption should be timeboxed
+        is_timeboxed = corruption.corruption_type == CorruptionType.TIMEBOXED
+
+        try:
+            df = corruption.apply_fn(df, pct, is_timeboxed)
+            n_estimated = int(len(df) * (pct / 100))
+            print(f"    Applied {corruption.name}: ~{n_estimated:,} rows ({pct:.1f}%)")
+        except Exception as e:
+            print(f"    WARNING: Failed to apply {corruption.name}: {e}")
+
+    return df
+
+
+def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int = None):
+    """Generic function to corrupt a dataset."""
+    print(f"\nProcessing {name}...")
+
+    # Load data
+    df = load_fn()
+    if target_rows and len(df) > target_rows:
+        df = df.sample(n=target_rows, random_state=args.seed)
+    print(f"  Loaded {len(df):,} rows")
+
+    # Save placebo if requested
+    if args.placebo:
+        placebo_path = os.path.join(args.output_dir, f"{name}_placebo.csv")
+        df.to_csv(placebo_path, index=False)
+        print(f"  Saved placebo to {placebo_path}")
+
+    # Get and apply corruptions
+    corruptions = corruptions_fn()
+    df = apply_corruptions(df, corruptions, args)
+
+    # Shuffle and save
+    df = df.sample(frac=1, random_state=args.seed + 1).reset_index(drop=True)
+    output_path = os.path.join(args.output_dir, f"{name}.csv")
+    df.to_csv(output_path, index=False)
+    print(f"  Saved {len(df):,} rows to {output_path}")
+
+    return df
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Corrupt datasets with realistic data quality issues")
+    parser.add_argument('--randomize', action='store_true',
+                        help='Randomly select 1-8 corruptions per dataset')
+    parser.add_argument('--scale', type=float, default=1.0,
+                        help='Scale corruption percentages (default: 1.0)')
+    parser.add_argument('--placebo', action='store_true',
+                        help='Also generate clean placebo versions')
+    parser.add_argument('--include-rare', action='store_true',
+                        help='Include rare corruptions (0.5-1%% rate)')
+    parser.add_argument('--include-timeboxed', action='store_true',
+                        help='Include timeboxed corruptions (contiguous blocks)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed (default: 42)')
+    parser.add_argument('--output-dir', type=str, default='corrupted',
+                        help='Output directory (default: corrupted/)')
+    parser.add_argument('--datasets', type=str, nargs='*',
+                        help='Specific datasets to process (default: all)')
+
+    args = parser.parse_args()
+
+    # Set random seeds
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print("="*70)
+    print("DATA QUALITY POC - Corruption Engine")
+    print("="*70)
+    print(f"\nOptions:")
+    print(f"  Randomize: {args.randomize}")
+    print(f"  Scale: {args.scale}")
+    print(f"  Placebo: {args.placebo}")
+    print(f"  Include rare: {args.include_rare}")
+    print(f"  Include timeboxed: {args.include_timeboxed}")
+    print(f"  Seed: {args.seed}")
+    print(f"  Output dir: {args.output_dir}")
+
+    # Define all datasets
+    datasets = {
+        'nyc_taxi_v1': {
+            'load': lambda: pd.read_csv('raw/nyc_taxi_1m.csv'),
+            'corruptions': get_taxi_v1_corruptions,
+            'target_rows': 900000,
+        },
+        'online_retail_v1': {
+            'load': lambda: pd.read_csv('raw/online_retail.csv'),
+            'corruptions': get_retail_v1_corruptions,
+            'target_rows': None,
+        },
+        'chicago_crimes_v1': {
+            'load': lambda: pd.read_csv('raw/chicago_crimes_500k.csv'),
+            'corruptions': get_crimes_v1_corruptions,
+            'target_rows': 393000,
+        },
+        'air_quality_v1': {
+            'load': lambda: pd.read_csv('raw/air_quality_full.csv', low_memory=False),
+            'corruptions': get_airquality_v1_corruptions,
+            'target_rows': 250000,
+        },
+        'chicago_crimes_v2': {
+            'load': lambda: pd.read_csv('raw/chicago_crimes.csv'),
+            'corruptions': get_crimes_v2_corruptions,
+            'target_rows': 100000,
+        },
+        'nyc_taxi_v2': {
+            'load': lambda: pd.read_csv('raw/nyc_taxi_jan2024.csv'),
+            'corruptions': get_taxi_v2_corruptions,
+            'target_rows': 50000,
+        },
+        'online_retail_v2': {
+            'load': lambda: pd.read_csv('raw/online_retail.csv'),
+            'corruptions': get_retail_v2_corruptions,
+            'target_rows': 25000,
+        },
+        'air_quality_v2': {
+            'load': lambda: pd.read_csv('raw/air_quality_full.csv', low_memory=False),
+            'corruptions': get_airquality_v2_corruptions,
+            'target_rows': 10000,
+        },
+    }
+
+    # Filter datasets if specified
+    if args.datasets:
+        datasets = {k: v for k, v in datasets.items() if k in args.datasets}
+
+    # Check for raw files
+    required_files = ['raw/nyc_taxi_1m.csv', 'raw/online_retail.csv',
+                      'raw/chicago_crimes_500k.csv', 'raw/air_quality_full.csv',
+                      'raw/chicago_crimes.csv', 'raw/nyc_taxi_jan2024.csv']
+    missing = [f for f in required_files if not os.path.exists(f)]
+    if missing:
+        print(f"\nERROR: Missing raw files: {missing}")
+        print("Run 'python download_datasets.py' first.")
+        return 1
+
+    # Process each dataset
+    for name, config in datasets.items():
+        try:
+            corrupt_dataset(name, config['load'], config['corruptions'], args, config['target_rows'])
+        except Exception as e:
+            print(f"ERROR processing {name}: {e}")
+
+    print("\n" + "="*70)
+    print("CORRUPTION COMPLETE")
+    print("="*70)
+
+    if args.placebo:
+        print("\nPlacebo files generated alongside corrupted versions.")
+        print("Use these as a control group for comparison.")
+
+    return 0
+
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("DATA QUALITY POC - Corrupting Real Datasets")
-    print("=" * 70)
-    print()
-    print("Target sizes:")
-    print("  - nyc_taxi_v1:      1,000,000 rows")
-    print("  - online_retail_v1:   541,909 rows")
-    print("  - chicago_crimes_v1:  500,000 rows")
-    print("  - air_quality_v1:     250,000 rows")
-    print("  - chicago_crimes_v2:  100,000 rows")
-    print("  - nyc_taxi_v2:         50,000 rows")
-    print("  - online_retail_v2:    25,000 rows")
-    print("  - air_quality_v2:      10,000 rows")
-    print()
-    print("=" * 70)
-    print()
-
-    # Check raw files
-    required = ['raw/nyc_taxi_1m.csv', 'raw/online_retail.csv',
-                'raw/chicago_crimes_500k.csv', 'raw/air_quality_full.csv',
-                'raw/chicago_crimes.csv', 'raw/nyc_taxi_jan2024.csv']
-    missing = [f for f in required if not os.path.exists(f)]
-    if missing:
-        print(f"ERROR: Missing raw files: {missing}")
-        exit(1)
-
-    corrupt_taxi_v1()
-    print()
-    corrupt_retail_v1()
-    print()
-    corrupt_crimes_v1()
-    print()
-    corrupt_airquality_v1()
-    print()
-    corrupt_crimes_v2()
-    print()
-    corrupt_taxi_v2()
-    print()
-    corrupt_retail_v2()
-    print()
-    corrupt_airquality_v2()
-    print()
-
-    print("=" * 70)
-    print("CORRUPTION COMPLETE")
-    print("=" * 70)
+    exit(main())

@@ -13,6 +13,63 @@ This POC demonstrates:
 
 **Make sure to turn off web tool use when testing with agentic coding assistants.** The corruption details are intentionally hosted externally so that the AI cannot "cheat" by reading this README to discover what issues exist in each dataset.
 
+## Quick Start
+
+```bash
+# Setup
+python3 -m venv venv
+source venv/bin/activate
+pip install pandas pyarrow openpyxl requests
+
+# Download raw datasets from public sources
+python download_datasets.py
+
+# Generate corrupted datasets (standard mode)
+python corrupt_datasets.py
+
+# Or with options (see below)
+python corrupt_datasets.py --randomize --placebo --include-rare
+```
+
+## Corruption Options
+
+The corruption script supports several modes:
+
+| Option | Description |
+|--------|-------------|
+| `--randomize` | Randomly select 1-8 corruptions per dataset instead of all |
+| `--scale FLOAT` | Scale corruption percentages (0.5 = half rate, 2.0 = double) |
+| `--placebo` | Generate clean "placebo" versions alongside corrupted files |
+| `--include-rare` | Include rare corruptions (0.5-1% rate) |
+| `--include-timeboxed` | Include timeboxed corruptions (contiguous blocks) |
+| `--seed INT` | Random seed for reproducibility (default: 42) |
+| `--datasets NAME...` | Process only specific datasets |
+
+### Example Configurations
+
+```bash
+# Standard: all corruptions at default percentages
+python corrupt_datasets.py
+
+# Randomized subset with placebo files for comparison
+python corrupt_datasets.py --randomize --placebo
+
+# Lighter corruption for easier detection tasks
+python corrupt_datasets.py --scale 0.5
+
+# Full chaos mode - everything enabled
+python corrupt_datasets.py --randomize --include-rare --include-timeboxed --placebo
+
+# Process only specific datasets
+python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
+```
+
+### Corruption Types
+
+- **Standard**: Common issues at typical rates (3-25%)
+- **Rare**: Uncommon but realistic issues (0.5-1.5%)
+- **Timeboxed**: Contiguous blocks of errors simulating system outages, bad batches, etc.
+
 ## Datasets
 
 ### Summary
@@ -47,21 +104,6 @@ For the detailed corruption manifest (what issues were injected and at what perc
 
 ---
 
-## Usage
-
-### Testing Data Quality Detection
-
-Download any corrupted CSV and pass it to a fresh analysis session to identify issues without prior knowledge of the corruption.
-
-### Regenerating Data
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install pandas pyarrow openpyxl requests
-python3 corrupt_datasets.py
-```
-
 ## Issue Categories
 
 - **Timestamp/Date**: Format mixing, future dates, temporal logic violations
@@ -73,3 +115,10 @@ python3 corrupt_datasets.py
 - **Business Logic**: Constraint violations, impossible combinations
 - **Referential Integrity**: Invalid IDs, code/description mismatches
 - **Categorical**: Format variations, encoding inconsistencies
+
+## Testing Methodology
+
+1. **Blind Test**: Pass a corrupted CSV to a fresh analysis session (web tools disabled)
+2. **Placebo Control**: Use `--placebo` to generate clean versions for comparison
+3. **Difficulty Scaling**: Use `--scale` to adjust corruption intensity
+4. **Randomization**: Use `--randomize` for unpredictable corruption combinations
