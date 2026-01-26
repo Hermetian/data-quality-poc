@@ -76,6 +76,7 @@ python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
 
 | Dataset | Rows | Size | Domain | Corruption Theme |
 |---------|------|------|--------|------------------|
+| `usgs_earthquakes_placebo.csv` | 50,000 | ~8MB | Geological | **NONE (clean control)** |
 | `nyc_taxi_v1.csv` | 900,000 | 90MB | Transportation | Timestamps, impossible values |
 | `online_retail_v1.csv` | 541,909 | 45MB | E-commerce | Encoding, text issues |
 | `chicago_crimes_v1.csv` | 393,406 | 95MB | Public Safety | Geographic corruption |
@@ -85,10 +86,13 @@ python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
 | `online_retail_v2.csv` | 25,000 | 2.3MB | E-commerce | Business logic |
 | `air_quality_v2.csv` | 10,920 | 3.4MB | Environmental | Temporal, geographic |
 
+> **Note:** The `usgs_earthquakes_placebo` dataset is intentionally clean with zero corruptions. Use it as a control to test for false positives in your data quality detection.
+
 ### Data Sources
 
 | Dataset | Source | License |
 |---------|--------|---------|
+| USGS Earthquakes | [USGS Earthquake Catalog](https://earthquake.usgs.gov/fdsnws/event/1/) | Public Domain |
 | NYC Yellow Taxi | [NYC TLC Trip Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) | Public Domain |
 | Online Retail | [UCI ML Repository](https://archive.ics.uci.edu/dataset/352/online+retail) | CC BY 4.0 |
 | Chicago Crimes | [Chicago Data Portal](https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2) | Public Domain |

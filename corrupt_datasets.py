@@ -787,7 +787,7 @@ def apply_corruptions(df: pd.DataFrame, corruptions: List[Corruption], args) -> 
     return df
 
 
-def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int = None):
+def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int = None, is_placebo: bool = False):
     """Generic function to corrupt a dataset."""
     print(f"\nProcessing {name}...")
 
@@ -797,7 +797,15 @@ def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int =
         df = df.sample(n=target_rows, random_state=args.seed)
     print(f"  Loaded {len(df):,} rows")
 
-    # Save placebo if requested
+    # If this is a designated placebo dataset, skip all corruption
+    if is_placebo:
+        print(f"  PLACEBO DATASET - no corruptions applied")
+        output_path = os.path.join(args.output_dir, f"{name}.csv")
+        df.to_csv(output_path, index=False)
+        print(f"  Saved {len(df):,} rows to {output_path}")
+        return df
+
+    # Save placebo version if requested (for non-placebo datasets)
     if args.placebo:
         placebo_path = os.path.join(args.output_dir, f"{name}_placebo.csv")
         df.to_csv(placebo_path, index=False)
@@ -858,6 +866,12 @@ def main():
 
     # Define all datasets
     datasets = {
+        'usgs_earthquakes_placebo': {
+            'load': lambda: pd.read_csv('raw/usgs_earthquakes.csv'),
+            'corruptions': lambda: [],  # NO CORRUPTIONS - pure placebo
+            'target_rows': 50000,
+            'is_placebo': True,
+        },
         'nyc_taxi_v1': {
             'load': lambda: pd.read_csv('raw/nyc_taxi_1m.csv'),
             'corruptions': get_taxi_v1_corruptions,
@@ -907,7 +921,8 @@ def main():
     # Check for raw files
     required_files = ['raw/nyc_taxi_1m.csv', 'raw/online_retail.csv',
                       'raw/chicago_crimes_500k.csv', 'raw/air_quality_full.csv',
-                      'raw/chicago_crimes.csv', 'raw/nyc_taxi_jan2024.csv']
+                      'raw/chicago_crimes.csv', 'raw/nyc_taxi_jan2024.csv',
+                      'raw/usgs_earthquakes.csv']
     missing = [f for f in required_files if not os.path.exists(f)]
     if missing:
         print(f"\nERROR: Missing raw files: {missing}")
@@ -917,7 +932,14 @@ def main():
     # Process each dataset
     for name, config in datasets.items():
         try:
-            corrupt_dataset(name, config['load'], config['corruptions'], args, config['target_rows'])
+            corrupt_dataset(
+                name,
+                config['load'],
+                config['corruptions'],
+                args,
+                config.get('target_rows'),
+                config.get('is_placebo', False)
+            )
         except Exception as e:
             print(f"ERROR processing {name}: {e}")
 

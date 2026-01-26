@@ -230,6 +230,76 @@ def download_air_quality():
     return True
 
 
+def download_usgs_earthquakes():
+    """
+    Download USGS Earthquake data - used as a PLACEBO (clean control dataset).
+    """
+    print("\n" + "="*60)
+    print("USGS Earthquake Data (PLACEBO - no corruption)")
+    print("="*60)
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  ERROR: pandas required. Run: pip install pandas")
+        return False
+
+    csv_path = "raw/usgs_earthquakes.csv"
+    if os.path.exists(csv_path):
+        print(f"  Using cached {csv_path}")
+        return True
+
+    # USGS Earthquake API - get last 2 years of M2.5+ earthquakes
+    # This gives us ~50-100K records
+    print("  Fetching earthquake data from USGS API...")
+
+    # Get data in chunks by time period to avoid API limits
+    all_data = []
+
+    # Fetch multiple months of data
+    base_url = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+
+    from datetime import datetime, timedelta
+    end_date = datetime.now()
+
+    for i in range(24):  # 24 months
+        start = end_date - timedelta(days=30)
+        params = {
+            'format': 'csv',
+            'starttime': start.strftime('%Y-%m-%d'),
+            'endtime': end_date.strftime('%Y-%m-%d'),
+            'minmagnitude': '2.5',
+            'orderby': 'time'
+        }
+
+        url = f"{base_url}?format=csv&starttime={params['starttime']}&endtime={params['endtime']}&minmagnitude=2.5"
+        print(f"\r  Fetching {params['starttime']} to {params['endtime']}...", end='', flush=True)
+
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            chunk_df = pd.read_csv(io.StringIO(response.text))
+            if len(chunk_df) > 0:
+                all_data.append(chunk_df)
+        except Exception as e:
+            print(f"\n  Warning: Failed to fetch chunk: {e}")
+
+        end_date = start
+
+    print()
+
+    if not all_data:
+        print("  ERROR: No data retrieved from USGS")
+        return False
+
+    df = pd.concat(all_data, ignore_index=True)
+    df = df.drop_duplicates(subset=['id'])  # Remove any duplicates from overlapping queries
+    df.to_csv(csv_path, index=False)
+    print(f"  Saved {len(df):,} earthquakes to {csv_path}")
+
+    return True
+
+
 def main():
     print("="*60)
     print("DATA QUALITY POC - Downloading Raw Datasets")
@@ -244,6 +314,7 @@ def main():
     results['online_retail'] = download_online_retail()
     results['chicago_crimes'] = download_chicago_crimes()
     results['air_quality'] = download_air_quality()
+    results['usgs_earthquakes'] = download_usgs_earthquakes()
 
     print("\n" + "="*60)
     print("DOWNLOAD SUMMARY")
