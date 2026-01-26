@@ -866,7 +866,7 @@ def main():
 
     # Define all datasets
     datasets = {
-        'usgs_earthquakes_placebo': {
+        'usgs_earthquakes_v1': {
             'load': lambda: pd.read_csv('raw/usgs_earthquakes.csv'),
             'corruptions': lambda: [],  # NO CORRUPTIONS - pure placebo
             'target_rows': 50000,
