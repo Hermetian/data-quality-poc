@@ -102,7 +102,7 @@ python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
 
 For the detailed corruption manifest (what issues were injected and at what percentages), see:
 
-**https://paste.rs/Xq7F6**
+**https://rentry.co/ayum24nw**
 
 ---
 
