@@ -8,7 +8,7 @@ Usage:
 Options:
     --randomize         Randomly select 1-8 corruptions per dataset (default: all)
     --scale FLOAT       Scale corruption percentages (0.5 = half rate, 2.0 = double)
-    --placebo           Also generate clean "placebo" versions for comparison
+    --control           Also generate clean "control" versions for comparison
     --include-rare      Include rare corruptions (0.5-1% rate)
     --include-timeboxed Include timeboxed corruptions (contiguous blocks)
     --seed INT          Random seed for reproducibility (default: 42)
@@ -19,14 +19,14 @@ Examples:
     # Standard corruption (all issues, default percentages)
     python corrupt_datasets.py
 
-    # Randomized subset with placebo files
-    python corrupt_datasets.py --randomize --placebo
+    # Randomized subset with control files
+    python corrupt_datasets.py --randomize --control
 
     # Half the usual corruption rate with rare issues
     python corrupt_datasets.py --scale 0.5 --include-rare
 
     # Full chaos mode
-    python corrupt_datasets.py --randomize --include-rare --include-timeboxed --placebo
+    python corrupt_datasets.py --randomize --include-rare --include-timeboxed --control
 """
 
 import pandas as pd
@@ -787,7 +787,7 @@ def apply_corruptions(df: pd.DataFrame, corruptions: List[Corruption], args) -> 
     return df
 
 
-def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int = None, is_placebo: bool = False):
+def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int = None, is_control: bool = False):
     """Generic function to corrupt a dataset."""
     print(f"\nProcessing {name}...")
 
@@ -797,19 +797,19 @@ def corrupt_dataset(name: str, load_fn, corruptions_fn, args, target_rows: int =
         df = df.sample(n=target_rows, random_state=args.seed)
     print(f"  Loaded {len(df):,} rows")
 
-    # If this is a designated placebo dataset, skip all corruption
-    if is_placebo:
-        print(f"  PLACEBO DATASET - no corruptions applied")
+    # If this is a designated control dataset, skip all corruption
+    if is_control:
+        print(f"  CONTROL DATASET - no corruptions applied")
         output_path = os.path.join(args.output_dir, f"{name}.csv")
         df.to_csv(output_path, index=False)
         print(f"  Saved {len(df):,} rows to {output_path}")
         return df
 
-    # Save placebo version if requested (for non-placebo datasets)
-    if args.placebo:
-        placebo_path = os.path.join(args.output_dir, f"{name}_placebo.csv")
-        df.to_csv(placebo_path, index=False)
-        print(f"  Saved placebo to {placebo_path}")
+    # Save control version if requested (for non-control datasets)
+    if args.control:
+        control_path = os.path.join(args.output_dir, f"{name}_control.csv")
+        df.to_csv(control_path, index=False)
+        print(f"  Saved control to {control_path}")
 
     # Get and apply corruptions
     corruptions = corruptions_fn()
@@ -830,8 +830,8 @@ def main():
                         help='Randomly select 1-8 corruptions per dataset')
     parser.add_argument('--scale', type=float, default=1.0,
                         help='Scale corruption percentages (default: 1.0)')
-    parser.add_argument('--placebo', action='store_true',
-                        help='Also generate clean placebo versions')
+    parser.add_argument('--control', action='store_true',
+                        help='Also generate clean control versions')
     parser.add_argument('--include-rare', action='store_true',
                         help='Include rare corruptions (0.5-1%% rate)')
     parser.add_argument('--include-timeboxed', action='store_true',
@@ -858,7 +858,7 @@ def main():
     print(f"\nOptions:")
     print(f"  Randomize: {args.randomize}")
     print(f"  Scale: {args.scale}")
-    print(f"  Placebo: {args.placebo}")
+    print(f"  Control: {args.control}")
     print(f"  Include rare: {args.include_rare}")
     print(f"  Include timeboxed: {args.include_timeboxed}")
     print(f"  Seed: {args.seed}")
@@ -868,9 +868,9 @@ def main():
     datasets = {
         'usgs_earthquakes_v1': {
             'load': lambda: pd.read_csv('raw/usgs_earthquakes.csv'),
-            'corruptions': lambda: [],  # NO CORRUPTIONS - pure placebo
+            'corruptions': lambda: [],  # NO CORRUPTIONS - pure control
             'target_rows': 50000,
-            'is_placebo': True,
+            'is_control': True,
         },
         'nyc_taxi_v1': {
             'load': lambda: pd.read_csv('raw/nyc_taxi_1m.csv'),
@@ -938,7 +938,7 @@ def main():
                 config['corruptions'],
                 args,
                 config.get('target_rows'),
-                config.get('is_placebo', False)
+                config.get('is_control', False)
             )
         except Exception as e:
             print(f"ERROR processing {name}: {e}")
@@ -947,8 +947,8 @@ def main():
     print("CORRUPTION COMPLETE")
     print("="*70)
 
-    if args.placebo:
-        print("\nPlacebo files generated alongside corrupted versions.")
+    if args.control:
+        print("\nControl files generated alongside corrupted versions.")
         print("Use these as a control group for comparison.")
 
     return 0

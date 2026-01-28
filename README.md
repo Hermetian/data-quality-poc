@@ -28,7 +28,7 @@ python download_datasets.py
 python corrupt_datasets.py
 
 # Or with options (see below)
-python corrupt_datasets.py --randomize --placebo --include-rare
+python corrupt_datasets.py --randomize --control --include-rare
 ```
 
 ## Corruption Options
@@ -39,7 +39,7 @@ The corruption script supports several modes:
 |--------|-------------|
 | `--randomize` | Randomly select 1-8 corruptions per dataset instead of all |
 | `--scale FLOAT` | Scale corruption percentages (0.5 = half rate, 2.0 = double) |
-| `--placebo` | Generate clean "placebo" versions alongside corrupted files |
+| `--control` | Generate clean "control" versions alongside corrupted files |
 | `--include-rare` | Include rare corruptions (0.5-1% rate) |
 | `--include-timeboxed` | Include timeboxed corruptions (contiguous blocks) |
 | `--seed INT` | Random seed for reproducibility (default: 42) |
@@ -51,14 +51,14 @@ The corruption script supports several modes:
 # Standard: all corruptions at default percentages
 python corrupt_datasets.py
 
-# Randomized subset with placebo files for comparison
-python corrupt_datasets.py --randomize --placebo
+# Randomized subset with control files for comparison
+python corrupt_datasets.py --randomize --control
 
 # Lighter corruption for easier detection tasks
 python corrupt_datasets.py --scale 0.5
 
 # Full chaos mode - everything enabled
-python corrupt_datasets.py --randomize --include-rare --include-timeboxed --placebo
+python corrupt_datasets.py --randomize --include-rare --include-timeboxed --control
 
 # Process only specific datasets
 python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
@@ -74,17 +74,17 @@ python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
 
 ### Summary
 
-| Dataset | Rows | Size | Domain | Corruption Theme |
-|---------|------|------|--------|------------------|
-| `usgs_earthquakes_v1.csv` | 50,000 | ~9MB | Geological | Seismic data issues |
-| `nyc_taxi_v1.csv` | 900,000 | 90MB | Transportation | Timestamps, impossible values |
-| `online_retail_v1.csv` | 541,909 | 45MB | E-commerce | Encoding, text issues |
-| `chicago_crimes_v1.csv` | 393,406 | 95MB | Public Safety | Geographic corruption |
-| `air_quality_v1.csv` | 250,000 | 78MB | Environmental | Sensor/unit issues |
-| `chicago_crimes_v2.csv` | 103,000 | 24MB | Public Safety | Temporal, categorical |
-| `nyc_taxi_v2.csv` | 54,600 | 5.5MB | Transportation | Duplicates, nulls |
-| `online_retail_v2.csv` | 25,000 | 2.3MB | E-commerce | Business logic |
-| `air_quality_v2.csv` | 10,920 | 3.4MB | Environmental | Temporal, geographic |
+| Dataset | Rows | Size | Domain |
+|---------|------|------|--------|
+| `usgs_earthquakes_v1.csv` | 50,000 | ~9MB | Geological |
+| `nyc_taxi_v1.csv` | 900,000 | 90MB | Transportation |
+| `online_retail_v1.csv` | 541,909 | 45MB | E-commerce |
+| `chicago_crimes_v1.csv` | 393,406 | 95MB | Public Safety |
+| `air_quality_v1.csv` | 250,000 | 78MB | Environmental |
+| `chicago_crimes_v2.csv` | 103,000 | 24MB | Public Safety |
+| `nyc_taxi_v2.csv` | 54,600 | 5.5MB | Transportation |
+| `online_retail_v2.csv` | 25,000 | 2.3MB | E-commerce |
+| `air_quality_v2.csv` | 10,920 | 3.4MB | Environmental |
 
 ### Data Sources
 
@@ -102,7 +102,7 @@ python corrupt_datasets.py --datasets air_quality_v1 nyc_taxi_v2
 
 For the detailed corruption manifest (what issues were injected and at what percentages), see:
 
-**https://rentry.co/s5dsur8s**
+**https://rentry.co/bnh3gs9m**
 
 ---
 
@@ -121,6 +121,6 @@ For the detailed corruption manifest (what issues were injected and at what perc
 ## Testing Methodology
 
 1. **Blind Test**: Pass a corrupted CSV to a fresh analysis session (web tools disabled)
-2. **Placebo Control**: Use `--placebo` to generate clean versions for comparison
+2. **Control Group**: Use `--control` to generate clean versions for comparison
 3. **Difficulty Scaling**: Use `--scale` to adjust corruption intensity
 4. **Randomization**: Use `--randomize` for unpredictable corruption combinations
